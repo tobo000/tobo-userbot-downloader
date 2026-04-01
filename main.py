@@ -83,47 +83,36 @@ def scrape_erome(url):
 async def tobo_downloader(client, message):
     raw_text = message.text.split('\n')
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
-    if not urls: return await message.edit("❌ No links found.")
+    if not urls: return
     
-    # Store messages to delete later
-    temp_messages = [message] 
+    topic_id = message.message_thread_id
+    temp_status_msgs = []
     
-    await message.edit(f"🚀 **Tobo Pro V8.18**\nQueue: {len(urls)} Albums")
-
+    # Process each album
     for idx, url in enumerate(urls, 1):
         if "erome.com" in url:
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
-            status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} Photos, {len(videos)} Videos")
-            temp_messages.append(status_msg)
+            
+            status_msg = await message.reply(f"🔍 Analyzing Album: `{album_id}`", message_thread_id=topic_id)
+            temp_status_msgs.append(status_msg)
             last_edit = [0]
 
-            # 1. PHOTOS
+            # 1. PHOTOS (Media Group)
             if photos:
-                photo_files = []
-                for p_idx, p_url in enumerate(photos, 1):
-                    filename = p_url.split('/')[-1].split('?')[0] or f"img_{p_idx}.jpg"
-                    filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    bar = create_progress_bar(p_idx, len(photos))
-                    await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📸 **Downloading Photo {p_idx}/{len(photos)}**\n{bar}", last_edit)
-                    try:
-                        r = session.get(p_url, stream=True)
-                        with open(filepath, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=1024): f.write(chunk)
-                        photo_files.append(filepath)
-                    except: pass
-                    if len(photo_files) == 10 or p_idx == len(photos):
-                        await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📤 **Uploading Photo Batch...**", last_edit, force=True)
-                        await client.send_media_group(message.chat.id, [InputMediaPhoto(pf) for pf in photo_files])
-                        for pf in photo_files: 
-                            if os.path.exists(pf): os.remove(pf)
-                        photo_files = []
+                for i in range(0, len(photos), 10):
+                    batch = photos[i:i+10]
+                    await edit_status(status_msg, f"📸 Downloading Photos: {album_id}...", last_edit, force=True)
+                    # Note: We send direct URLs for speed in photos
+                    await client.send_media_group(message.chat.id, [InputMediaPhoto(img) for img in batch], message_thread_id=topic_id)
 
-            # 2. VIDEOS
+            # 2. VIDEOS (Media Group + Fallback)
             if videos:
+                video_files = []
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
+                    
                     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                     with session.get(v_url, headers=headers, stream=True) as r:
                         total_size = int(r.headers.get('content-length', 0))
@@ -134,29 +123,42 @@ async def tobo_downloader(client, message):
                                     f.write(chunk)
                                     dl_size += len(chunk)
                                     bar = create_progress_bar(dl_size, total_size)
-                                    await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📥 **Downloading Video {v_idx}/{len(videos)}**\n{bar}\n⚡ {get_human_size(dl_size)} / {get_human_size(total_size)}", last_edit)
+                                    await edit_status(status_msg, f"📥 Video {v_idx}/{len(videos)}\n{bar}\n{album_id}", last_edit)
+                        
                         optimize_video(filepath)
                         dur, w, h = get_video_meta(filepath)
                         thumb = get_video_thumbnail(filepath, f"{filepath}.jpg")
-                        await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📤 **Uploading Video {v_idx}/{len(videos)}...**", last_edit, force=True)
-                        await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 Size: {get_human_size(total_size)}", supports_streaming=True)
-                        if os.path.exists(filepath): os.remove(filepath)
-                        if thumb and os.path.exists(thumb): os.remove(thumb)
-            
-            await status_msg.edit(f"✅ **COMPLETED:** `{album_id}`")
+                        video_files.append({"path": filepath, "thumb": thumb, "w": w, "h": h, "dur": dur, "size": total_size})
 
-    # --- AUTO CLEAN LOGIC ---
-    done_msg = await message.reply("🏆 **All tasks finished! Cleaning logs in 5s...**")
-    await asyncio.sleep(5)
-    for msg in temp_messages:
-        try:
-            await msg.delete()
+                        if len(video_files) == 10 or v_idx == len(videos):
+                            await edit_status(status_msg, f"📤 Uploading Video Group: {album_id}...", last_edit, force=True)
+                            media_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=f"🎬 Size: {get_human_size(v['size'])}") for v in video_files]
+                            try:
+                                await client.send_media_group(message.chat.id, media_group, message_thread_id=topic_id)
+                            except:
+                                # Fallback if album fails
+                                for v in video_files:
+                                    await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], caption=f"🎬 Size: {get_human_size(v['size'])}", supports_streaming=True, message_thread_id=topic_id)
+                            
+                            # Cleanup
+                            for v in video_files:
+                                if os.path.exists(v["path"]): os.remove(v["path"])
+                                if v["thumb"] and os.path.exists(v["thumb"]): os.remove(v["thumb"])
+                            video_files = []
+
+            # Final persistence message for THIS album
+            await message.reply(f"✅ COMPLETED: `{album_id}`", message_thread_id=topic_id)
+
+    # Clean up all status messages and the command
+    for msg in temp_status_msgs:
+        try: await msg.delete()
         except: pass
-    await done_msg.delete()
+    try: await message.delete() # Delete the .dl command
+    except: pass
 
 async def start_bot():
     await app.start()
-    print("LOG: Tobo Pro V8.18 Auto-Clean is Online!")
+    print("LOG: Tobo Pro V8.20 (Topic-Optimized) is Online!")
     await idle()
 
 if __name__ == "__main__":
