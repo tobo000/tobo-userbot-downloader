@@ -3,17 +3,14 @@ import asyncio
 import requests
 import time
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto
 from concurrent.futures import ThreadPoolExecutor
 import yt_dlp
 
-# --- CONFIGURATION (Pulling from Environment Variables) ---
+# --- CONFIGURATION ---
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-
-# If you want to use a bot token instead of user account, add this:
-# BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
 
@@ -104,5 +101,16 @@ async def tobo_downloader(client, message):
                 await status.edit(f"❌ Error: {str(e)}")
     await message.reply("🏆 **All Tasks Completed!**")
 
-print("🚀 Tobo Pro Userbot is starting...")
-app.run()
+# --- NEW STARTUP LOGIC TO FIX PEER ID ERROR ---
+async def start_bot():
+    await app.start()
+    print("LOG: Userbot started. Syncing chat database...")
+    # This loop forces the bot to 'see' all your chats and fix the ID error
+    async for dialog in app.get_dialogs():
+        pass
+    print("LOG: Sync complete. Tobo Pro is now online!")
+    await idle()
+    await app.stop()
+
+if __name__ == "__main__":
+    app.run(start_bot())
