@@ -4,6 +4,7 @@ import requests
 import time
 import subprocess
 import json
+import math
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
@@ -19,25 +20,37 @@ DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
+# --- PROGRESS BAR HELPER ---
+def create_progress_bar(current, total):
+    percentage = current * 100 / total
+    finished_blocks = int(percentage / 10)
+    remaining_blocks = 10 - finished_blocks
+    return f"[{'█' * finished_blocks}{'░' * remaining_blocks}] {percentage:.1f}%"
+
 def get_human_size(num):
     for unit in ['B', 'KB', 'MB', 'GB']:
         if abs(num) < 1024.0: return f"{num:3.1f} {unit}"
         num /= 1024.0
     return f"{num:.1f} TB"
 
+async def edit_status(client, message, text, last_update_time):
+    """Edits message only if 3 seconds have passed to avoid flood."""
+    now = time.time()
+    if now - last_update_time[0] > 3:
+        try:
+            await message.edit(text)
+            last_update_time[0] = now
+        except: pass
+
+# --- ENGINES ---
 def get_video_meta(video_path):
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
         duration = int(float(data['format']['duration']))
-        width = 0
-        height = 0
-        for stream in data['streams']:
-            if stream['codec_type'] == 'video':
-                width = int(stream['width'])
-                height = int(stream['height'])
-                break
+        width = next(s['width'] for s in data['streams'] if s['codec_type'] == 'video')
+        height = next(s['height'] for s in data['streams'] if s['codec_type'] == 'video')
         return duration, width, height
     except: return 0, 0, 0
 
@@ -60,88 +73,65 @@ def scrape_erome(url):
         return p_l, v_l
     except: return [], []
 
-def download_nitro(url, path, headers, size, segs=4):
-    chunk = size // segs
-    def dl_part(s, e, n):
-        pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
-        with session.get(url, headers=h, stream=True) as r:
-            with open(pp, 'wb') as f:
-                for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
-    with ThreadPoolExecutor(max_workers=segs) as ex:
-        for i in range(segs): ex.submit(dl_part, i*chunk, (i+1)*chunk-1 if i < size-1 else size-1, i)
-    with open(path, 'wb') as f:
-        for i in range(segs):
-            pp = f"{path}.p{i}"
-            if os.path.exists(pp):
-                with open(pp, 'rb') as pf: f.write(pf.read())
-                os.remove(pp)
-
+# ==========================================
+# COMMAND HANDLER
+# ==========================================
 @app.on_message(filters.me & filters.command("dl", prefixes="."))
 async def tobo_downloader(client, message):
     raw_text = message.text.split('\n')
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
-    if not urls: return await message.edit("❌ Provide a link!")
+    if not urls: return await message.edit("❌ No links found.")
     
-    await message.edit(f"🚀 **Tobo Pro V8.7**\nProcessing {len(urls)} album(s)...")
+    await message.edit(f"🚀 **Tobo Pro V8.8**\nQueue: {len(urls)} Albums")
 
     for idx, url in enumerate(urls, 1):
         if "erome.com" in url:
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
-            status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} Photos, {len(videos)} Videos\n⏳ Initializing...")
+            status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} P, {len(videos)} V")
+            last_edit = [0] # Timer for throttling
 
-            # 1. Photos First
+            # 1. Photos
             if photos:
-                await status_msg.edit(f"📂 **Album:** `{album_id}`\n📸 Uploading Photos...")
                 for i in range(0, len(photos), 10):
                     batch = photos[i:i+10]
-                    media = [InputMediaPhoto(img) for img in batch]
-                    await client.send_media_group(message.chat.id, media)
+                    await client.send_media_group(message.chat.id, [InputMediaPhoto(img) for img in batch])
 
-            # 2. Videos (With Live Download Status)
+            # 2. Videos with Progress Bar
             if videos:
                 video_payload = []
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    thumb_path = f"{filepath}.jpg"
                     
-                    # Update status for user
-                    await status_msg.edit(f"📂 **Album:** `{album_id}`\n📥 Downloading Video `{v_idx}/{len(videos)}`...")
-                    
-                    try:
-                        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
-                        head = session.head(v_url, headers=headers, allow_redirects=True)
-                        size_bytes = int(head.headers.get('content-length', 0))
-                        p_size = get_human_size(size_bytes)
-                        
-                        if size_bytes > 15*1024*1024:
-                            download_nitro(v_url, filepath, headers, size_bytes)
-                        else:
-                            with session.get(v_url, headers=headers, stream=True) as r:
-                                with open(filepath, 'wb') as f:
-                                    for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
-                        
-                        # Process Meta
-                        duration, w, h = get_video_meta(filepath)
-                        thumb = get_video_thumbnail(filepath, thumb_path)
-                        
-                        video_payload.append(InputMediaVideo(
-                            filepath, thumb=thumb, width=w, height=h, 
-                            duration=duration, supports_streaming=True,
-                            caption=f"🎬 Size: {p_size}"
-                        ))
+                    # --- DOWNLOAD WITH LIVE BAR ---
+                    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
+                    with session.get(v_url, headers=headers, stream=True) as r:
+                        total_size = int(r.headers.get('content-length', 0))
+                        dl_size = 0
+                        with open(filepath, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=1024*1024):
+                                if chunk:
+                                    f.write(chunk)
+                                    dl_size += len(chunk)
+                                    bar = create_progress_bar(dl_size, total_size)
+                                    text = (f"📂 **Album:** `{album_id}`\n"
+                                            f"📥 **Downloading Video {v_idx}/{len(videos)}**\n"
+                                            f"{bar}\n"
+                                            f"⚡ {get_human_size(dl_size)} / {get_human_size(total_size)}")
+                                    await edit_status(client, status_msg, text, last_edit)
 
-                        # Send batch of 10 or the last few
+                        duration, w, h = get_video_meta(filepath)
+                        thumb = get_video_thumbnail(filepath, f"{filepath}.jpg")
+                        video_payload.append(InputMediaVideo(filepath, thumb=thumb, width=w, height=h, duration=duration, supports_streaming=True, caption=f"🎬 {get_human_size(total_size)}"))
+
                         if len(video_payload) == 10 or v_idx == len(videos):
-                            await status_msg.edit(f"📂 **Album:** `{album_id}`\n📤 Uploading Video Batch to Telegram...")
+                            await status_msg.edit(f"📂 **Album:** `{album_id}`\n📤 **Uploading Batch to Telegram...**")
                             await client.send_media_group(message.chat.id, video_payload)
                             for vid in video_payload:
                                 if os.path.exists(vid.media): os.remove(vid.media)
                                 if vid.thumb and os.path.exists(vid.thumb): os.remove(vid.thumb)
                             video_payload = []
-                    except Exception as e:
-                        await message.reply(f"⚠️ Error on Video {v_idx}: {e}")
             
             await status_msg.edit(f"✅ **COMPLETED:** `{album_id}`")
 
@@ -149,10 +139,8 @@ async def tobo_downloader(client, message):
 
 async def start_bot():
     await app.start()
-    async for dialog in app.get_dialogs(): pass
-    print("LOG: Tobo Pro V8.7 is online!")
+    print("LOG: Tobo Pro V8.8 with Live Bar is online!")
     await idle()
-    await app.stop()
 
 if __name__ == "__main__":
     app.run(start_bot())
