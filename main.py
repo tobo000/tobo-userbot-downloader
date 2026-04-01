@@ -4,12 +4,10 @@ import requests
 import time
 import subprocess
 import json
-import math
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
-import yt_dlp
 
 # --- CONFIGURATION ---
 API_ID = os.getenv("API_ID")
@@ -20,7 +18,7 @@ DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
-# --- PROGRESS BAR HELPER ---
+# --- HELPERS ---
 def create_progress_bar(current, total):
     percentage = current * 100 / total
     finished_blocks = int(percentage / 10)
@@ -33,26 +31,30 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
-async def edit_status(client, message, text, last_update_time):
-    """Edits message only if 3 seconds have passed to avoid flood."""
+async def edit_status(message, text, last_update_time, force=False):
     now = time.time()
-    if now - last_update_time[0] > 3:
+    if force or (now - last_update_time[0] > 3):
         try:
             await message.edit(text)
             last_update_time[0] = now
         except: pass
 
-# --- ENGINES ---
 def get_video_meta(video_path):
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
         duration = int(float(data['format']['duration']))
-        width = next(s['width'] for s in data['streams'] if s['codec_type'] == 'video')
-        height = next(s['height'] for s in data['streams'] if s['codec_type'] == 'video')
-        return duration, width, height
+        v = next(s for s in data['streams'] if s['codec_type'] == 'video')
+        return duration, v['width'], v['height']
     except: return 0, 0, 0
+
+def optimize_video(input_path):
+    output_path = input_path + "_ready.mp4"
+    try:
+        subprocess.run(['ffmpeg', '-i', input_path, '-c', 'copy', '-movflags', 'faststart', output_path, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
+        if os.path.exists(output_path): os.replace(output_path, input_path)
+    except: pass
 
 def get_video_thumbnail(video_path, thumb_path):
     try:
@@ -80,31 +82,50 @@ def scrape_erome(url):
 async def tobo_downloader(client, message):
     raw_text = message.text.split('\n')
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
-    if not urls: return await message.edit("❌ No links found.")
+    if not urls: return await message.edit("❌ Error: No links provided.")
     
-    await message.edit(f"🚀 **Tobo Pro V8.8**\nQueue: {len(urls)} Albums")
+    await message.edit(f"🚀 **Tobo Pro V8.17**\nProcessing {len(urls)} target(s)...")
 
     for idx, url in enumerate(urls, 1):
         if "erome.com" in url:
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
-            status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} P, {len(videos)} V")
-            last_edit = [0] # Timer for throttling
+            status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} Photos, {len(videos)} Videos")
+            last_edit = [0]
 
-            # 1. Photos
+            # 1. Photos with Live Progress Bar
             if photos:
-                for i in range(0, len(photos), 10):
-                    batch = photos[i:i+10]
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(img) for img in batch])
+                photo_files = []
+                for p_idx, p_url in enumerate(photos, 1):
+                    filename = p_url.split('/')[-1].split('?')[0]
+                    if not filename: filename = f"img_{p_idx}.jpg"
+                    filepath = os.path.join(DOWNLOAD_DIR, filename)
+                    
+                    # Live Update
+                    bar = create_progress_bar(p_idx, len(photos))
+                    await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📸 **Downloading Photo {p_idx}/{len(photos)}**\n{bar}", last_edit)
+                    
+                    try:
+                        r = session.get(p_url, stream=True)
+                        with open(filepath, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=1024): f.write(chunk)
+                        photo_files.append(filepath)
+                    except: pass
 
-            # 2. Videos with Progress Bar
+                    # Send in batches of 10
+                    if len(photo_files) == 10 or p_idx == len(photos):
+                        await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📤 **Uploading Photo Batch...**", last_edit, force=True)
+                        await client.send_media_group(message.chat.id, [InputMediaPhoto(pf) for pf in photo_files])
+                        for pf in photo_files: 
+                            if os.path.exists(pf): os.remove(pf)
+                        photo_files = []
+
+            # 2. Videos with Live Progress Bar (Nitro Byte-level)
             if videos:
-                video_payload = []
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
                     
-                    # --- DOWNLOAD WITH LIVE BAR ---
                     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                     with session.get(v_url, headers=headers, stream=True) as r:
                         total_size = int(r.headers.get('content-length', 0))
@@ -115,31 +136,26 @@ async def tobo_downloader(client, message):
                                     f.write(chunk)
                                     dl_size += len(chunk)
                                     bar = create_progress_bar(dl_size, total_size)
-                                    text = (f"📂 **Album:** `{album_id}`\n"
-                                            f"📥 **Downloading Video {v_idx}/{len(videos)}**\n"
-                                            f"{bar}\n"
-                                            f"⚡ {get_human_size(dl_size)} / {get_human_size(total_size)}")
-                                    await edit_status(client, status_msg, text, last_edit)
+                                    await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📥 **Downloading Video {v_idx}/{len(videos)}**\n{bar}\n⚡ {get_human_size(dl_size)} / {get_human_size(total_size)}", last_edit)
 
-                        duration, w, h = get_video_meta(filepath)
+                        optimize_video(filepath)
+                        dur, w, h = get_video_meta(filepath)
                         thumb = get_video_thumbnail(filepath, f"{filepath}.jpg")
-                        video_payload.append(InputMediaVideo(filepath, thumb=thumb, width=w, height=h, duration=duration, supports_streaming=True, caption=f"🎬 {get_human_size(total_size)}"))
-
-                        if len(video_payload) == 10 or v_idx == len(videos):
-                            await status_msg.edit(f"📂 **Album:** `{album_id}`\n📤 **Uploading Batch to Telegram...**")
-                            await client.send_media_group(message.chat.id, video_payload)
-                            for vid in video_payload:
-                                if os.path.exists(vid.media): os.remove(vid.media)
-                                if vid.thumb and os.path.exists(vid.thumb): os.remove(vid.thumb)
-                            video_payload = []
+                        
+                        # Upload One-by-One for Video safety + immediate viewing
+                        await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📤 **Uploading Video {v_idx}/{len(videos)}...**", last_edit, force=True)
+                        await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 Size: {get_human_size(total_size)}", supports_streaming=True)
+                        
+                        if os.path.exists(filepath): os.remove(filepath)
+                        if thumb and os.path.exists(thumb): os.remove(thumb)
             
             await status_msg.edit(f"✅ **COMPLETED:** `{album_id}`")
 
-    await message.reply("🏆 **All Tasks Finished!**")
+    await message.reply("🏆 **All tasks finished successfully.**")
 
 async def start_bot():
     await app.start()
-    print("LOG: Tobo Pro V8.8 with Live Bar is online!")
+    print("LOG: Tobo Pro V8.17 Live Dash is online!")
     await idle()
 
 if __name__ == "__main__":
