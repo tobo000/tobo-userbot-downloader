@@ -4,6 +4,7 @@ import requests
 import time
 import subprocess
 import json
+import re
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
@@ -69,7 +70,7 @@ def download_nitro(url, path, headers, size, segs=4):
     with ThreadPoolExecutor(max_workers=segs) as ex:
         for i in range(segs):
             start = i * chunk
-            end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
+            end = (i + 1) * chunk - 1 if i < size - 1 else size - 1
             ex.submit(dl_part, start, end, i)
             
     with open(path, 'wb') as f:
@@ -81,45 +82,46 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V8.37: Deep Video Scan)
+# SCRAPER ENGINE (V8.38: Ultra Deep Scan)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
         
-        for j in soup.find_all(["div", "section"], {"id": ["related_albums", "comments", "footer"]}): 
-            j.decompose()
-        
-        # --- ROBUST VIDEO SCRAPING ---
+        # --- ULTRA DEEP VIDEO SCRAPING ---
         v_links = []
-        for v in soup.find_all('video'):
-            # ឆែកមើលគ្រប់ attribute ដែលអាចមាន link
-            src = v.get('src') or v.get('data-src')
-            if not src:
-                # បើរកមិនឃើញក្នុង tag video ឆែកក្នុង tag source វិញ
-                sources = v.find_all('source')
-                for s in sources:
-                    src = s.get('src') or s.get('data-src')
-                    if src: break
-            
-            if src:
-                full_src = src if src.startswith('http') else 'https:' + src
-                # ធានាថាយកតែ Link វីដេអូពិតប្រាកដ
-                if ".mp4" in full_src.lower() or "erome.com/video" in full_src.lower():
-                    v_links.append(full_src)
         
-        v_l = list(dict.fromkeys(v_links))
+        # វិធីទី១៖ ស្វែងរកក្នុង tag video និង source
+        for tag in soup.find_all(['video', 'source']):
+            for attr in ['src', 'data-src', 'data-url']:
+                link = tag.get(attr)
+                if link and ".mp4" in link.lower():
+                    v_links.append(link if link.startswith('http') else 'https:' + link)
+
+        # វិធីទី២៖ ស្វែងរក Link ដែលបញ្ចប់ដោយ .mp4 នៅក្នុងកូដ HTML ទាំងមូល (Regex)
+        # ជួនកាល Erome លាក់ Link ក្នុង JavaScript
+        found_mp4 = re.findall(r'(https?://[^\s"\'>]+\.mp4[^\s"\'>]*)', res.text)
+        v_links.extend(found_mp4)
+
+        # សម្អាត Link ស្ទួន និង Link ដែលមិនមែន erome video
+        v_l = []
+        for v in list(set(v_links)):
+            if "erome.com" in v and "/video" in v:
+                v_l.append(v)
         
         # --- PHOTO SCRAPING ---
-        p_l = list(dict.fromkeys([i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))]))
-        p_l = [x if x.startswith('http') else 'https:' + x for x in p_l if x]
+        p_l = []
+        for img in soup.select('div.img img'):
+            src = img.get('data-src') or img.get('src')
+            if src and "erome.com" in src:
+                p_l.append(src if src.startswith('http') else 'https:' + src)
         
         print(f"DEBUG: Found {len(p_l)} photos and {len(v_l)} videos in {album_title}")
-        return album_title, p_l, v_l
+        return album_title, list(dict.fromkeys(p_l)), list(dict.fromkeys(v_l))
     except Exception as e:
         print(f"ERROR SCRAPING: {e}")
         return "Error", [], []
@@ -152,9 +154,13 @@ async def process_album(client, message, url):
     if not photos and not videos: return
     
     album_id = url.rstrip('/').split('/')[-1]
-    t_id = getattr(message, "message_thread_id", None)
     
-    status = await client.send_message(message.chat.id, f"🔍 Analyzing: **{title}**\n📸 Photos: {len(photos)} | 🎬 Videos: {len(videos)}", reply_to_message_id=message.id, message_thread_id=t_id)
+    # លុប message_thread_id ចេញ ដើម្បីកុំឱ្យ Error លើ Library ចាស់
+    status = await client.send_message(
+        message.chat.id, 
+        f"🔍 Analyzing: **{title}**\n📸 Photos: {len(photos)} | 🎬 Videos: {len(videos)}", 
+        reply_to_message_id=message.id
+    )
     last_edit = [0]
 
     # 1. Photos
@@ -168,7 +174,7 @@ async def process_album(client, message, url):
                 with open(filepath, 'wb') as f: f.write(r.content)
                 p_files.append(filepath)
                 if len(p_files) == 10 or p_idx == len(photos):
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], reply_to_message_id=message.id, message_thread_id=t_id)
+                    await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], reply_to_message_id=message.id)
                     for pf in p_files: 
                         if os.path.exists(pf): os.remove(pf)
                     p_files = []
@@ -178,9 +184,8 @@ async def process_album(client, message, url):
     if videos:
         video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
-            # Clean filename
             v_name = v_url.split('/')[-1].split('?')[0]
-            if not v_name.endswith('.mp4'): v_name += ".mp4"
+            if ".mp4" not in v_name: v_name += ".mp4"
             
             filepath = os.path.join(DOWNLOAD_DIR, f"{album_id}_{v_name}")
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
@@ -206,16 +211,14 @@ async def process_album(client, message, url):
                     "cap": f"🎬 **{title}**\n📦 {get_human_size(size)}"
                 })
 
-                # បញ្ជូនវីដេអូជាក្រុម ឬបញ្ជូនម្តងមួយ
                 if len(video_payload) == 10 or v_idx == len(videos):
                     await edit_status(status, f"📤 **{title}**\nUploading video batch...", last_edit, force=True)
                     m_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"]) for v in video_payload]
                     try:
-                        await client.send_media_group(message.chat.id, m_group, reply_to_message_id=message.id, message_thread_id=t_id)
+                        await client.send_media_group(message.chat.id, m_group, reply_to_message_id=message.id)
                     except:
-                        # បើបញ្ជូនជាក្រុមបរាជ័យ បញ្ជូនម្តងមួយវិញ
                         for v in video_payload:
-                            await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"], reply_to_message_id=message.id, message_thread_id=t_id)
+                            await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"], reply_to_message_id=message.id)
                     
                     for v in video_payload:
                         if os.path.exists(v["path"]): os.remove(v["path"])
@@ -225,7 +228,7 @@ async def process_album(client, message, url):
                 print(f"Error processing video {v_idx}: {e}")
 
     await status.delete()
-    await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id, message_thread_id=t_id)
+    await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
 
 # ==========================================
 # COMMAND HANDLERS
@@ -249,7 +252,7 @@ async def user_handler(client, message):
     if not urls:
         return await crawl_msg.edit(f"❌ No content for `{username}`.")
     
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums for `{username}`. Starting Sequential Download...")
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums for `{username}`. Starting Download...")
     
     for url in urls:
         await process_album(client, message, url)
@@ -263,7 +266,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.37 Ready (Deep Video Scan Fix)!")
+        print("LOG: Tobo Pro V8.38 Ready (Fix Error & Video)!")
         await idle()
 
 if __name__ == "__main__":
