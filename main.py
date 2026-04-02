@@ -8,11 +8,12 @@ from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
-# Replace these with your actual credentials
-API_ID = 34684478
-API_HASH = "3ee498f0d6b06bf3fa8a5b102af12942"
+# --- LOAD CONFIGURATION FROM .env ---
+load_dotenv()
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
 
 app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
@@ -23,11 +24,6 @@ if not os.path.exists(DOWNLOAD_DIR):
 session = requests.Session()
 
 # --- HELPERS ---
-
-def create_progress_bar(current, total):
-    if total == 0: return "[░░░░░░░░░░] 0%"
-    pct = current * 100 / total
-    return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -45,7 +41,6 @@ async def edit_status(message, text, last_update_time, force=False):
             pass
 
 def get_video_meta(video_path):
-    """Extracts duration, width, and height using FFprobe"""
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
@@ -57,9 +52,7 @@ def get_video_meta(video_path):
         return 0, 0, 0
 
 def download_nitro(url, path, headers, size, segs=4):
-    """Multi-threaded downloader for faster speeds"""
     chunk = size // segs
-    
     def dl_part(s, e, n):
         part_path = f"{path}.p{n}"
         h = headers.copy()
@@ -78,7 +71,6 @@ def download_nitro(url, path, headers, size, segs=4):
         for future in futures:
             future.result()
 
-    # Reassemble parts
     with open(path, 'wb') as f:
         for i in range(segs):
             part_path = f"{path}.p{i}"
@@ -90,7 +82,6 @@ def download_nitro(url, path, headers, size, segs=4):
 # --- SCRAPER ENGINE ---
 
 def scrape_album_details(url):
-    """Scrapes titles, video links, and image links from an album URL"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
     try:
         res = session.get(url, headers=headers, timeout=20)
@@ -98,11 +89,7 @@ def scrape_album_details(url):
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled Album"
         
-        # Clean up unwanted HTML elements
-        for j in soup.find_all(["div", "section"], {"id": ["related_albums", "comments", "footer"]}): 
-            j.decompose()
-
-        # Collect video links
+        # Videos
         video_links = []
         for v in soup.find_all('video'):
             source = v.find('source')
@@ -111,7 +98,7 @@ def scrape_album_details(url):
                 video_links.append(src if src.startswith('http') else 'https:' + src)
         video_links = list(dict.fromkeys(video_links))
 
-        # Collect photo links
+        # Photos
         photo_links = []
         for i in soup.select('div.img img'):
             src = i.get('data-src') or i.get('src')
@@ -125,7 +112,7 @@ def scrape_album_details(url):
         return "Error", [], []
 
 def get_all_profile_links(username):
-    """Crawls all pages of a user profile including reposts"""
+    """Crawl Original Albums AND Reposts across all pages"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     all_links = []
     sub_paths = ["", "/reposts"]
@@ -161,7 +148,6 @@ async def process_single_album(client, message, url, topic_id):
     status_msg = await client.send_message(message.chat.id, f"🔍 **Crawling:** {title}", message_thread_id=topic_id)
     last_edit = [0]
 
-    # Process Photos (Max 10 per media group)
     if photos:
         photo_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -178,7 +164,6 @@ async def process_single_album(client, message, url, topic_id):
                     photo_files = []
             except: pass
 
-    # Process Videos
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             filename = v_url.split('/')[-1].split('?')[0]
@@ -189,7 +174,6 @@ async def process_single_album(client, message, url, topic_id):
                 file_size = int(head.headers.get('content-length', 0))
                 await edit_status(status_msg, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\nSize: {get_human_size(file_size)}", last_edit, force=True)
                 
-                # Use multi-threaded download if file is larger than 15MB
                 if file_size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, file_size)
                 else:
@@ -214,8 +198,7 @@ async def process_single_album(client, message, url, topic_id):
                 )
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e:
-                print(f"Video Upload Error: {e}")
+            except: pass
 
     await status_msg.delete()
 
@@ -234,25 +217,25 @@ async def dl_cmd(client, message):
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    status = await message.reply(f"🕵️‍♂️ **Deep Crawling:** `{username}`\nCollecting all albums and reposts...")
+    status = await message.reply(f"🕵️‍♂️ **Deep Crawling:** `{username}`\nCollecting all albums (Originals + Reposts)...")
     
     urls = get_all_profile_links(username)
     if not urls: 
-        return await status.edit(f"❌ No content found for profile: `{username}`.")
+        return await status.edit(f"❌ No content found for `{username}`.")
 
-    await status.edit(f"🚀 **Found {len(urls)} items.**\nStarting sequential archive...")
+    await status.edit(f"🚀 Found **{len(urls)} items**. Starting download...")
     topic_id = getattr(message, "message_thread_id", None)
 
     for url in urls:
         await process_single_album(client, message, url, topic_id)
-        await asyncio.sleep(2) # Safe delay
+        await asyncio.sleep(2) 
 
     await message.reply(f"🏆 **Mission Complete:** `{username}` fully archived.")
     await status.delete()
 
 async def main():
     async with app:
-        print("LOG: V8.33 Deep Crawler is Online!")
+        print("LOG: V8.34 Bot is Online (using .env)!")
         await idle()
 
 if __name__ == "__main__":
