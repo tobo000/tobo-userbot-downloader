@@ -11,7 +11,7 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
 
-# --- CONFIGURATION (Safe API Loading) ---
+# --- CONFIGURATION ---
 load_dotenv()
 API_ID = int(os.getenv("API_ID", "34684478"))
 API_HASH = os.getenv("API_HASH", "3ee498f0d6b06bf3fa8a5b102af12942")
@@ -24,7 +24,7 @@ if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 
 cancel_tasks = {}
 
-# --- DATABASE (Point 1: No Duplicate Archive) ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect("bot_archive_v89.db")
     cursor = conn.cursor()
@@ -49,7 +49,7 @@ def mark_processed(url):
     except: pass
     conn.close()
 
-# --- HELPERS (Your Original Helpers Restored) ---
+# --- HELPERS ---
 def create_progress_bar(current, total):
     if total == 0: return "[░░░░░░░░░░] 0%"
     pct = current * 100 / total
@@ -80,7 +80,7 @@ def get_video_meta(video_path):
         return duration, v['width'], v['height']
     except: return 0, 0, 0
 
-# --- DOWNLOADING ENGINE (Async Optimized) ---
+# --- DOWNLOADING ---
 async def download_file(url, path):
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
     try:
@@ -94,25 +94,20 @@ async def download_file(url, path):
     except: return False
     return False
 
-# --- DEEP CRAWLER ENGINE (Albums + Reposts + Paginations) ---
+# --- SCRAPER ---
 async def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as r:
             soup = BeautifulSoup(await r.text(), 'html.parser')
             title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-            
-            # Extract all Videos (including source tags)
             v_l = []
             for v in soup.find_all('video'):
                 src = v.get('src') or v.get('data-src')
                 if not src:
                     st = v.find('source'); src = st.get('src') if st else None
                 if src: v_l.append(src if src.startswith('http') else 'https:' + src)
-            
-            # Extract Photos (using your original selectors)
             p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img') if "erome.com" in (img.get('data-src') or img.get('src', ''))]
-            
             return title, list(dict.fromkeys(p_l)), list(dict.fromkeys(v_l))
 
 async def get_all_profile_links(username, status_msg):
@@ -122,46 +117,40 @@ async def get_all_profile_links(username, status_msg):
         for sub in ["", "/reposts"]:
             page = 1
             while True:
-                await status_msg.edit_text(f"🕵️‍♂️ **Scanning Profile:** `{username}`\nSection: {sub if sub else 'Albums'}\nPage: {page}\nFound: {len(all_links)} links")
+                await status_msg.edit_text(f"🕵️‍♂️ Scanning: `{username}`\nSection: {sub if sub else 'Albums'}\nPage: {page}\nFound: {len(all_links)}")
                 url = f"https://www.erome.com/{username}{sub}?page={page}"
-                async with session.get(url, headers=headers) as r:
+                async with session.get(url) as r:
                     if r.status != 200: break
                     soup = BeautifulSoup(await r.text(), 'html.parser')
-                    # Collect album links
                     links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
                     if not links: break
                     for l in links:
                         full = 'https://www.erome.com' + l
                         if full not in all_links: all_links.append(full)
-                    # Pagination Check
                     if not soup.find("a", string="Next"): break
                     page += 1
-                    await asyncio.sleep(0.5)
     return all_links
 
-# --- DELIVERY ENGINE ---
+# --- DELIVERY ---
 async def process_single_album(client, message, url, topic_id):
     if is_processed(url): return
     title, photos, videos = await scrape_album_details(url)
     if not photos and not videos: return
-    
     album_id = url.rstrip('/').split('/')[-1]
     status = await client.send_message(message.chat.id, f"📥 **Preparing:** `{title}`", message_thread_id=topic_id)
 
-    # Process Photos (Media Group logic from your original code)
-    if photos:
-        photo_paths = []
-        for i, p_url in enumerate(photos, 1):
-            path = os.path.join(DOWNLOAD_DIR, f"{album_id}_p{i}.jpg")
-            if await download_file(p_url, path): photo_paths.append(path)
-            if len(photo_paths) == 10 or i == len(photos):
-                if photo_paths:
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
-                    for p in photo_paths: 
-                        if os.path.exists(p): os.remove(p)
-                    photo_paths = []
+    # Process Photos
+    photo_paths = []
+    for i, p_url in enumerate(photos, 1):
+        path = os.path.join(DOWNLOAD_DIR, f"{album_id}_p{i}.jpg")
+        if await download_file(p_url, path): photo_paths.append(path)
+        if len(photo_paths) == 10 or i == len(photos):
+            if photo_paths:
+                await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
+                for p in photo_paths: os.remove(p)
+                photo_paths = []
 
-    # Process Videos (Progress Bar Animation restored)
+    # Process Videos
     if videos:
         for i, v_url in enumerate(videos, 1):
             path = os.path.join(DOWNLOAD_DIR, f"{album_id}_v{i}.mp4")
@@ -169,7 +158,6 @@ async def process_single_album(client, message, url, topic_id):
                 dur, w, h = get_video_meta(path)
                 thumb = path + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', path, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
-                
                 start_time = [time.time()]
                 try:
                     await client.send_video(
@@ -199,7 +187,10 @@ async def user_cmd(client, message):
     cancel_tasks[chat_id] = False
     topic_id = getattr(message, "message_thread_id", None)
 
-    status = await message.reply(f"🕵️‍♂️ **Initializing Scanner...**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_query_data=f"stop_{chat_id}")]]))
+    status = await message.reply(
+        f"🕵️‍♂️ **Initializing Scanner...**",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", data=f"stop_{chat_id}")]])
+    )
     
     urls = await get_all_profile_links(username, status)
     if not urls: return await status.edit_text("❌ No content found.")
@@ -225,7 +216,7 @@ async def stop_callback(client, callback_query: CallbackQuery):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.90 Master Edition is Online!")
+        print("LOG: V8.91 Master Edition is Online!")
         await idle()
 
 if __name__ == "__main__":
