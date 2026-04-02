@@ -107,16 +107,18 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 async def get_all_profile_content(username, status_msg):
-    """Deep Scanner: Loops through every page of Posts and Reposts correctly"""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0'}
+    """Ultra Scanner: Robust page flipping for both Posts and Reposts"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0',
+        'Referer': f'https://www.erome.com/{username}'
+    }
     all_links = []
     
     for tab in ["", "/reposts"]:
         page = 1
         tab_name = "Original Posts" if tab == "" else "Reposts"
         while True:
-            # Live Status Update
-            await status_msg.edit_text(f"🕵️‍♂️ **Scanning {username}...**\nSection: `{tab_name}`\nPage: `{page}`\nItems Found: `{len(all_links)}`")
+            await status_msg.edit_text(f"🕵️‍♂️ **Ultra Scanning {username}...**\nSection: `{tab_name}`\nPage: `{page}`\nItems Found: `{len(all_links)}`")
             
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
@@ -124,17 +126,24 @@ async def get_all_profile_content(username, status_msg):
                 if res.status_code != 200: break
                 soup = BeautifulSoup(res.text, 'html.parser')
                 
-                # Find only valid album links
-                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
+                # Capture album links more aggressively
+                links = []
+                for a in soup.find_all("a", href=True):
+                    href = a['href']
+                    # Valid album link pattern: /a/XXXXXXX
+                    if re.search(r'/a/[a-zA-Z0-9]+', href) and "erome.com" not in href:
+                        links.append(href)
                 
-                if not links: break
+                if not links:
+                    # If this tab has no links, don't break the whole loop, just try next tab
+                    break
                 
                 for l in links:
                     full_url = 'https://www.erome.com' + l
                     if full_url not in all_links:
                         all_links.append(full_url)
                 
-                # Robust 'Next' button detection
+                # Check for Next button
                 next_page = soup.find("a", string=re.compile("Next", re.I))
                 if not next_page: break
                 
@@ -223,20 +232,20 @@ async def dl_handler(client, message):
 async def user_handler(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    crawl_msg = await message.reply(f"🕵️‍♂️ **Initializing Scanner for `{username}`...**")
+    crawl_msg = await message.reply(f"🕵️‍♂️ **Initializing Ultra Scanner for `{username}`...**")
     
     urls = await get_all_profile_content(username, crawl_msg)
     
     if not urls:
-        return await crawl_msg.edit(f"❌ No content found for `{username}`.")
+        return await crawl_msg.edit(f"❌ No content found for user `{username}`.")
     
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** items (Originals + Reposts).\nStarting sequential archive...")
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** items. Starting sequential archive...")
     
     for url in urls:
         await process_album(client, message, url)
         await asyncio.sleep(2)
         
-    await message.reply(f"🏆 Archive for `{username}` complete! Total items: {len(urls)}")
+    await message.reply(f"🏆 Profile `{username}` archive complete! Total items: {len(urls)}")
     try:
         await crawl_msg.delete()
         await message.delete()
@@ -244,7 +253,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.49 Ready (Deep Scanner Fix)!")
+        print("LOG: Tobo Pro V8.50 Ready (Ultra Scanner Fix)!")
         await idle()
 
 if __name__ == "__main__":
