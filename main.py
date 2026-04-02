@@ -75,7 +75,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V8.41: Robust Video Fix)
+# SCRAPER ENGINE (V8.42: Deep Scrape Fix)
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
@@ -85,7 +85,7 @@ def scrape_album_details(url):
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
         
-        # --- ROBUST PHOTO SCRAPING ---
+        # --- PHOTO SCRAPING ---
         p_links = []
         for img in soup.select('div.img img'):
             src = img.get('data-src') or img.get('src')
@@ -93,35 +93,23 @@ def scrape_album_details(url):
                 p_links.append(src if src.startswith('http') else 'https:' + src)
         p_l = list(dict.fromkeys(p_links))
         
-        # --- DEEP SCAN VIDEO SCRAPING ---
+        # --- ROBUST VIDEO SCRAPING ---
         v_links = []
-        # ឆែកគ្រប់ Video Tags និង Source Tags ទាំងអស់
-        for v_tag in soup.find_all('video'):
-            # ឆែកក្នុង attributes របស់ video tag
-            for attr in ['src', 'data-src']:
-                val = v_tag.get(attr)
-                if val: v_links.append(val)
-            # ឆែកក្នុង tags source ដែលនៅខាងក្នុង video tag
-            for s_tag in v_tag.find_all('source'):
-                for attr in ['src', 'data-src']:
-                    val = s_tag.get(attr)
-                    if val: v_links.append(val)
-
-        # សម្អាត និងកែទម្រង់ Link ឱ្យត្រឹមត្រូវ
-        v_l = []
-        for link in v_links:
-            full_link = link if link.startswith('http') else 'https:' + link
-            # យកតែ link ណាដែលជាវីដេអូពិតប្រាកដ
-            if ".mp4" in full_link.lower() or "/video/" in full_link.lower():
-                v_l.append(full_link)
+        # Check all tags that might have video source
+        for tag in soup.find_all(['video', 'source', 'a']):
+            src = tag.get('src') or tag.get('data-src') or tag.get('href')
+            if src and (".mp4" in src.lower() or "/video/" in src.lower()):
+                v_links.append(src if src.startswith('http') else 'https:' + src)
         
-        v_l = list(dict.fromkeys(v_l))
+        # Regex search in case it's in JavaScript
+        raw_vids = re.findall(r'https?://[^\s"\'>]+\.mp4', res.text)
+        v_links.extend(raw_vids)
+        
+        v_l = list(dict.fromkeys([v for v in v_links if "erome.com" in v]))
         
         print(f"DEBUG: Found {len(p_l)} photos and {len(v_l)} videos in {album_title}")
         return album_title, p_l, v_l
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return "Error", [], []
+    except: return "Error", [], []
 
 def get_all_profile_content(username):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -150,13 +138,10 @@ async def process_album(client, message, url):
     if not photos and not videos: return
     
     album_id = url.rstrip('/').split('/')[-1]
-    
-    # ផ្ញើសារប្រាប់ចំនួនមុននឹងទាញយក
     status_text = f"🔍 **Analyzing:** `{title}`\n\n📸 Photos: `{len(photos)}` \n🎬 Videos: `{len(videos)}`"
     status = await client.send_message(message.chat.id, status_text, reply_to_message_id=message.id)
     last_edit = [0]
 
-    # 1. បញ្ជូនរូបភាព
     if photos:
         p_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -173,14 +158,11 @@ async def process_album(client, message, url):
                     p_files = []
             except: pass
 
-    # 2. បញ្ជូនវីដេអូ
     if videos:
         video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
-            # រៀបចំឈ្មោះ file ឱ្យស្អាត
             v_name = v_url.split('/')[-1].split('?')[0]
             if ".mp4" not in v_name.lower(): v_name += ".mp4"
-            
             filepath = os.path.join(DOWNLOAD_DIR, f"{album_id}_{v_name}")
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
             try:
@@ -197,7 +179,9 @@ async def process_album(client, message, url):
                 
                 dur, w, h = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
+                
+                # FIXED: Changed STNULL to DEVNULL
+                subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 video_payload.append({
                     "path": filepath, "thumb": thumb, "w": w, "h": h, "dur": dur,
@@ -245,7 +229,7 @@ async def user_handler(client, message):
     if not urls:
         return await crawl_msg.edit(f"❌ No content for `{username}`.")
     
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums. Sequential mode active...")
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums for `{username}`. Starting Download...")
     
     for url in urls:
         await process_album(client, message, url)
@@ -259,7 +243,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.41 Ready (Video Detection Fix)!")
+        print("LOG: Tobo Pro V8.42 Ready (Fixed STNULL & Scrape)!")
         await idle()
 
 if __name__ == "__main__":
