@@ -24,7 +24,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE (Anti-Duplicate System) ---
+# --- 1. DATABASE (Anti-Duplicate) ---
 def init_db():
     conn = sqlite3.connect("bot_archive.db")
     cursor = conn.cursor()
@@ -66,24 +66,25 @@ async def progress_callback(current, total, status_msg, start_time, action_text)
     if now - start_time[0] > 5:
         bar = create_progress_bar(current, total)
         try:
-            await status_msg.edit_text(
-                f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}"
-            )
+            await status_msg.edit_text(f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
             start_time[0] = now
         except: pass
 
 def get_video_meta(video_path):
+    """Extract REAL video metadata so Telegram can show it as a playable video"""
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return 0, 1280, 720, False
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
-        duration = int(float(data['format']['duration']))
+        duration = int(float(data.get('format', {}).get('duration', 0)))
         streams = data.get('streams', [])
         v = next((s for s in streams if s['codec_type'] == 'video'), {})
+        width = int(v.get('width', 1280))
+        height = int(v.get('height', 720))
         has_audio = any(s['codec_type'] == 'audio' for s in streams)
-        return duration, v.get('width', 1280), v.get('height', 720), has_audio
+        return duration, width, height, has_audio
     except: return 0, 1280, 720, False
 
 def download_nitro(url, path, headers, size, segs=4):
@@ -107,7 +108,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V8.80: No-Miss Scraper)
+# SCRAPER ENGINE
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -131,7 +132,7 @@ async def scan_all_content(username, status_msg):
     for tab in ["", "/reposts"]:
         page = 1
         while True:
-            await status_msg.edit_text(f"🔍 **Scanning `{username}`...**\n🚀 Items Found: `{len(all_urls)}` \n📄 Currently at Page: {page}")
+            await status_msg.edit_text(f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_urls)}` items\n📄 Page: {page}")
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, timeout=20)
@@ -150,7 +151,7 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# DELIVERY ENGINE (The Core Mechanism)
+# DELIVERY ENGINE (FIXED FOR SEEABLE VIDEO)
 # ==========================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
@@ -162,8 +163,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
-    status = await client.send_message(chat_id, f"📥 **[{current}/{total}]** Preparing: `{title}`", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"📥 **[{current}/{total}]** Archiving: `{title}`", reply_to_message_id=reply_id)
 
+    # Photos
     if photos:
         p_files = []
         for i, p_url in enumerate(photos, 1):
@@ -178,6 +180,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     p_files = []
             except: pass
 
+    # Videos (FIXED LOGIC)
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
@@ -185,6 +188,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             try:
                 head = session.head(v_url, allow_redirects=True, timeout=15)
                 size = int(head.headers.get('content-length', 0))
+                
                 await status.edit_text(f"📥 **[{current}/{total}]** Downloading Video {v_idx}/{len(videos)}...\n📦 Size: {get_human_size(size)}")
                 
                 if size > 15*1024*1024: download_nitro(v_url, filepath, {'User-Agent': 'Mozilla/5.0', 'Referer': url}, size)
@@ -193,22 +197,34 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         with open(filepath, 'wb') as f:
                             for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
                 
-                if not os.path.exists(filepath): continue
+                if not os.path.exists(filepath) or os.path.getsize(filepath) == 0: continue
+
+                # 1. Get Metadata (Crucial for playable video)
                 dur, w, h, has_audio = get_video_meta(filepath)
-                if not has_audio:
-                    temp = filepath + ".fix.mp4"
-                    subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(temp): os.remove(filepath); os.rename(temp, filepath)
                 
+                # 2. Add Silent Audio if missing (To prevent GIF conversion)
+                if not has_audio:
+                    temp_fix = filepath + ".fix.mp4"
+                    subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.path.exists(temp_fix):
+                        os.remove(filepath); os.rename(temp_fix, filepath)
+                
+                # 3. Create Thumbnail (Crucial for playable appearance)
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
+                # 4. Upload with Correct Parameters
                 start_time = [time.time()]
                 await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                    width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}",
-                    supports_streaming=True, reply_to_message_id=reply_id,
-                    progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
+                    chat_id=chat_id,
+                    video=filepath,
+                    thumb=thumb if os.path.exists(thumb) else None,
+                    width=w, height=h, duration=dur,
+                    caption=f"🎬 **{title}**\n📦 {get_human_size(size)}",
+                    supports_streaming=True, # Allows immediate watching
+                    reply_to_message_id=reply_id,
+                    progress=progress_callback,
+                    progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
                 )
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
@@ -229,21 +245,19 @@ async def user_cmd(client, message):
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False 
 
-    msg = await message.reply(f"🛰 **Initializing Scanner...**")
+    msg = await message.reply(f"🛰 **Scanning profile...**")
     all_urls = await scan_all_content(username, msg)
-    if not all_urls: return await msg.edit_text(f"❌ No content found for `{username}`.")
+    if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
 
     total = len(all_urls)
-    await msg.edit_text(f"✅ **Scan Complete!**\n📦 Total: `{total}` items.\n🚀 Archiving...", 
+    await msg.edit_text(f"✅ Found: `{total}` items. Archiving...", 
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
 
     for i, url in enumerate(all_urls, 1):
-        if cancel_tasks.get(chat_id):
-            await message.reply("🛑 Stopped by user.")
-            break
+        if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, total)
         await asyncio.sleep(1)
-    await msg.delete(); await message.reply(f"🏆 Completed Archive for `{username}`!")
+    await msg.delete(); await message.reply(f"🏆 Done for `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
 async def handle_stop(client, callback: CallbackQuery):
@@ -261,7 +275,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.80 (Final Master) Online!")
+        print("LOG: Tobo Pro V8.81 Online!")
         await idle()
 
 if __name__ == "__main__":
