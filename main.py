@@ -25,7 +25,7 @@ DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
-# --- HELPERS (Keep your original helpers) ---
+# --- HELPERS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, current * 100 / total)
@@ -63,7 +63,10 @@ def download_nitro(url, path, headers, size, segs=4):
             with open(pp, 'wb') as f:
                 for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
     with ThreadPoolExecutor(max_workers=segs) as ex:
-        for i in range(segs): ex.submit(dl_part, i*chunk, (i+1)*chunk-1 if i < size-1 else size-1, i)
+        for i in range(segs):
+            start = i * chunk
+            end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
+            ex.submit(dl_part, start, end, i)
     with open(path, 'wb') as f:
         for i in range(segs):
             pp = f"{path}.p{i}"
@@ -72,40 +75,39 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V8.39: Updated for Video)
+# SCRAPER ENGINE (V8.40: Pre-Pull Logic)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
         
-        for j in soup.find_all(["div", "section"], {"id": ["related_albums", "comments", "footer"]}): j.decompose()
+        # --- IMPROVED PHOTO SCRAPING ---
+        p_links = []
+        for img in soup.select('div.img img'):
+            src = img.get('data-src') or img.get('src')
+            if src and "erome.com" in src:
+                p_links.append(src if src.startswith('http') else 'https:' + src)
+        p_l = list(dict.fromkeys(p_links))
         
-        # --- ROBUST VIDEO SCRAPING ---
+        # --- IMPROVED VIDEO SCRAPING (Deep Search) ---
         v_links = []
-        # Check standard tags
-        for tag in soup.find_all(['video', 'source', 'a']):
-            src = tag.get('src') or tag.get('data-src') or tag.get('href')
+        # Check video and source tags
+        for tag in soup.find_all(['video', 'source']):
+            src = tag.get('src') or tag.get('data-src')
             if src and ".mp4" in src.lower():
                 v_links.append(src if src.startswith('http') else 'https:' + src)
         
-        # Regex fallback (search in scripts/html body)
-        raw_mp4s = re.findall(r'(https?://[^\s"\'>]+\.mp4[^\s"\'>]*)', res.text)
-        v_links.extend(raw_mp4s)
-        
-        # Clean and Filter
-        v_l = []
-        for v in list(set(v_links)):
-            if "erome.com" in v and "/video" in v: v_l.append(v)
+        # Check for mp4 links in text (Regex fallback)
+        raw_mp4s = re.findall(r'https?://[^\s"\'>]+\.mp4', res.text)
+        for link in raw_mp4s:
+            if "erome.com" in link: v_links.append(link)
             
-        # Photos
-        p_l = list(dict.fromkeys([i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))]))
-        p_l = [x if x.startswith('http') else 'https:' + x for x in p_l if x]
+        v_l = list(dict.fromkeys(v_links))
         
-        print(f"DEBUG: Found {len(p_l)} photos and {len(v_l)} videos in {album_title}")
         return album_title, p_l, v_l
     except: return "Error", [], []
 
@@ -129,23 +131,22 @@ def get_all_profile_content(username):
     return list(dict.fromkeys(all_links))
 
 # ==========================================
-# DELIVERY ENGINE (Fixed: No message_thread_id)
+# DELIVERY ENGINE
 # ==========================================
 async def process_album(client, message, url):
+    # 1. SCRAPE FIRST
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     
     album_id = url.rstrip('/').split('/')[-1]
     
-    # --- FIXED: Removed message_thread_id to avoid Error ---
-    status = await client.send_message(
-        message.chat.id, 
-        f"🔍 Analyzing: **{title}**\n📸 Photos: {len(photos)} | 🎬 Videos: {len(videos)}", 
-        reply_to_message_id=message.id
-    )
+    # 2. TELL COUNTS FIRST (Removed message_thread_id for stability)
+    status_text = f"🔍 **Analyzing:** `{title}`\n\n📸 Photos: `{len(photos)}` \n🎬 Videos: `{len(videos)}`"
+    status = await client.send_message(message.chat.id, status_text, reply_to_message_id=message.id)
     last_edit = [0]
+    await asyncio.sleep(1)
 
-    # 1. Photos
+    # 3. DOWNLOAD & SEND PHOTOS
     if photos:
         p_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -162,7 +163,7 @@ async def process_album(client, message, url):
                     p_files = []
             except: pass
 
-    # 2. Videos
+    # 4. DOWNLOAD & SEND VIDEOS
     if videos:
         video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
@@ -173,7 +174,7 @@ async def process_album(client, message, url):
             try:
                 head = session.head(v_url, headers=headers, allow_redirects=True)
                 size = int(head.headers.get('content-length', 0))
-                await edit_status(status, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\n{get_human_size(size)}", last_edit, force=True)
+                await edit_status(status, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\nSize: {get_human_size(size)}", last_edit, force=True)
                 
                 if size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, size)
@@ -210,7 +211,7 @@ async def process_album(client, message, url):
     await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
 
 # ==========================================
-# COMMAND HANDLERS (Keep your handlers)
+# COMMAND HANDLERS
 # ==========================================
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
@@ -245,7 +246,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.39 Ready (Original Style Fix)!")
+        print("LOG: Tobo Pro V8.40 Ready (Ultra Video Fix)!")
         await idle()
 
 if __name__ == "__main__":
