@@ -5,6 +5,7 @@ import time
 import subprocess
 import json
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
