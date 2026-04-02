@@ -1,6 +1,7 @@
 import os
 import asyncio
 import requests
+import aiohttp
 import time
 import subprocess
 import json
@@ -12,7 +13,7 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarku
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION (Keep your original Setup) ---
+# --- CONFIGURATION (Keep your Setup) ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
@@ -22,11 +23,11 @@ DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
-# Cache for button selection and stop task
+# Global States
 data_cache = {}
 cancel_tasks = {}
 
-# --- [NEW] DATABASE SYSTEM (Anti-Duplicate) ---
+# --- 1. DATABASE SYSTEM (Anti-Duplicate) ---
 def init_db():
     conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
@@ -51,7 +52,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- [KEEP] YOUR ORIGINAL HELPERS ---
+# --- 2. HELPERS (Keep Your Old Helpers) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, current * 100 / total)
@@ -84,7 +85,7 @@ def get_video_meta(video_path):
         return duration, v['width'], v['height'], has_audio
     except: return 0, 1280, 720, False
 
-# --- [KEEP] YOUR ORIGINAL NITRO DOWNLOADER ---
+# --- [KEEP OLD CODE] NITRO DOWNLOADER ---
 def download_nitro(url, path, headers, size, segs=4):
     chunk = size // segs
     def dl_part(s, e, n):
@@ -101,13 +102,55 @@ def download_nitro(url, path, headers, size, segs=4):
             ex.submit(dl_part, start, end, i)
     with open(path, 'wb') as f:
         for i in range(segs):
-            pp = f"{path}.p{i}"
+            pp = f"{path}.p{i}"; 
             if os.path.exists(pp):
                 with open(pp, 'rb') as pf: f.write(pf.read())
                 os.remove(pp)
 
 # ==========================================
-# [UPDATE] SCRAPER ENGINE (V8.70: High-Res Fix)
+# [NEW] ASYNC SCANNER (PREVENTS STUCK)
+# ==========================================
+async def full_scan_profile(username, status_msg):
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
+    results = {"posts": [], "reposts": []}
+    icons = ["🔍", "🔎", "🛰", "📡", "⚡"]
+    
+    async with aiohttp.ClientSession(headers=headers) as asession:
+        for tab in ["", "/reposts"]:
+            page = 1
+            key = "posts" if tab == "" else "reposts"
+            while True:
+                icon = icons[page % len(icons)]
+                # REAL-TIME UI UPDATE (No more stuck!)
+                await status_msg.edit_text(
+                    f"{icon} **Scanning {username}...**\n\n"
+                    f"📝 Posts: `{len(results['posts'])}` \n"
+                    f"🔁 Reposts: `{len(results['reposts'])}` \n\n"
+                    f"*Analyzing {key} - Page {page}...*"
+                )
+                
+                url = f"https://www.erome.com/{username}{tab}?page={page}"
+                try:
+                    async with asession.get(url, timeout=15) as res:
+                        if res.status != 200: break
+                        soup = BeautifulSoup(await res.text(), 'html.parser')
+                        found = []
+                        for a in soup.find_all("a", href=True):
+                            href = a['href']
+                            if "/a/" in href and "erome.com" not in href:
+                                full = 'https://www.erome.com' + href if href.startswith('/') else href
+                                if full not in results[key]: found.append(full)
+                        
+                        if not found: break
+                        results[key].extend(found)
+                        if not soup.find("a", string=re.compile(r"Next", re.I)): break
+                        page += 1
+                        await asyncio.sleep(0.1) # Fast UI update
+                except: break
+    return results
+
+# ==========================================
+# DELIVERY ENGINE (Keep Old Scrape Logic)
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0'}
@@ -116,82 +159,41 @@ def scrape_album_details(url):
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
         p_l = [x if x.startswith('http') else 'https:' + x for x in [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))] if x]
-        
-        v_candidates = []
-        for tag in soup.find_all(['video', 'source', 'a']):
-            src = tag.get('src') or tag.get('data-src') or tag.get('href')
-            if src and ".mp4" in src.lower(): v_candidates.append(src if src.startswith('http') else 'https:' + src)
-        v_candidates.extend(re.findall(r'https?://[^\s"\'>]+\.mp4', res.text))
-        
-        # [UPDATE] High Resolution Selection logic
+        v_candidates = re.findall(r'https?://[^\s"\'>]+\.mp4', res.text)
         v_l = list(dict.fromkeys([v for v in v_candidates if "erome.com" in v]))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
-        
         return title, p_l, v_l
     except: return "Error", [], []
 
-async def full_scan_profile(username, status_msg):
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
-    results = {"posts": [], "reposts": []}
-    icons = ["🔍", "🔎", "📡", "⚡"]
-    for tab in ["", "/reposts"]:
-        page = 1
-        key = "posts" if tab == "" else "reposts"
-        while True:
-            icon = icons[page % len(icons)]
-            await status_msg.edit_text(f"{icon} **Scanning {username}...**\n\n📝 Posts: `{len(results['posts'])}` \n🔁 Reposts: `{len(results['reposts'])}` \n\n*Reading {key} page {page}...*")
-            url = f"https://www.erome.com/{username}{tab}?page={page}"
-            try:
-                res = session.get(url, headers=headers, timeout=20)
-                if res.status_code != 200: break
-                soup = BeautifulSoup(res.text, 'html.parser')
-                links = [ 'https://www.erome.com' + a['href'] if a['href'].startswith('/') else a['href'] 
-                         for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href'] ]
-                if not links: break
-                added = 0
-                for l in links:
-                    if l not in results[key]: results[key].append(l); added += 1
-                if added == 0 or not soup.find("a", string=re.compile(r"Next", re.I)): break
-                page += 1
-                await asyncio.sleep(0.3)
-            except: break
-    return results
-
-# ==========================================
-# [KEEP] ORIGINAL DELIVERY + [UPDATE] SMART FOLDER
-# ==========================================
 async def process_album(client, message, url, username):
     album_id = url.rstrip('/').split('/')[-1]
-    
-    # Anti-Duplicate Check
     if is_processed(album_id): return
 
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     
-    # [NEW] Smart Folder Management
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
     status = await client.send_message(message.chat.id, f"📥 **Archiving:** `{title}`", reply_to_message_id=message.id)
     last_edit = [0]
 
-    # [KEEP] Photo delivery logic
+    # [KEEP OLD] Photo logic
     if photos:
         p_files = []
-        for p_idx, p_url in enumerate(photos, 1):
-            filepath = os.path.join(user_folder, f"img_{album_id}_{p_idx}.jpg")
+        for i, p_url in enumerate(photos, 1):
+            path = os.path.join(user_folder, f"img_{album_id}_{i}.jpg")
             try:
                 r = session.get(p_url, timeout=30)
-                with open(filepath, 'wb') as f: f.write(r.content)
-                if os.path.exists(filepath): p_files.append(filepath)
-                if len(p_files) == 10 or p_idx == len(photos):
+                with open(path, 'wb') as f: f.write(r.content)
+                if os.path.exists(path): p_files.append(path)
+                if len(p_files) == 10 or i == len(photos):
                     await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], reply_to_message_id=message.id)
                     for pf in p_files: os.remove(pf)
                     p_files = []
             except: pass
 
-    # [KEEP] Video delivery logic
+    # [KEEP OLD] Video logic + Nitro
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = v_url.split('/')[-1].split('?')[0]
@@ -202,7 +204,6 @@ async def process_album(client, message, url, username):
                 size = int(head.headers.get('content-length', 0))
                 await edit_status(status, f"📥 **Downloading HD Video {v_idx}/{len(videos)}**\nSize: {get_human_size(size)}", last_edit, force=True)
                 
-                # Use Nitro for Large, Requests for Small
                 if size > 15*1024*1024: download_nitro(v_url, filepath, {'User-Agent': 'Mozilla/5.0', 'Referer': url}, size)
                 else:
                     with session.get(v_url, stream=True, timeout=60) as r:
@@ -222,11 +223,11 @@ async def process_album(client, message, url, username):
                 os.remove(filepath); os.remove(thumb) if os.path.exists(thumb) else None
             except: pass
     
-    mark_processed(album_id) 
+    mark_processed(album_id)
     await status.delete()
 
 # ==========================================
-# HANDLERS (Stop Button Support)
+# HANDLERS
 # ==========================================
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
@@ -236,13 +237,13 @@ async def user_cmd(client, message):
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False 
 
-    msg = await message.reply(f"🛰 **Initializing Scanner...**")
+    msg = await message.reply(f"🛰 **Initializing Anti-Freeze Scanner...**")
     results = await full_scan_profile(username, msg)
     data_cache[username] = results
     
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📥 Download Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
-        [InlineKeyboardButton(f"🔁 Download Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
+        [InlineKeyboardButton(f"📥 Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
+        [InlineKeyboardButton(f"🔁 Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
     ])
     await msg.edit_text(f"👤 **User Profile:** `{username}`\n\n📝 Posts: `{len(results['posts'])}` | 🔁 Reposts: `{len(results['reposts'])}`", reply_markup=buttons)
 
@@ -255,23 +256,21 @@ async def handle_choice(client, callback: CallbackQuery):
     
     if not urls: return await callback.answer("❌ Empty.")
     
-    # Show Stop Button
-    stop_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP ARCHIVING", callback_data=f"stop_task|{chat_id}")]])
+    stop_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]])
     await callback.message.edit_text(f"🚀 **Archiving `{len(urls)}` {key}...**", reply_markup=stop_btn)
 
     for url in urls:
         if cancel_tasks.get(chat_id): 
-            await callback.message.reply("🛑 **Stopped by user.**")
+            await callback.message.reply("🛑 Stopped.")
             break
         await process_album(client, callback.message, url, username)
-        await asyncio.sleep(1.5)
-    await callback.message.reply(f"🏆 Completed archive for {username}!")
+        await asyncio.sleep(1)
+    await callback.message.reply(f"🏆 Done!")
 
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
 async def handle_stop(client, callback: CallbackQuery):
-    chat_id = int(callback.data.split("|")[1])
-    cancel_tasks[chat_id] = True
-    await callback.answer("Stopping task...", show_alert=True)
+    cancel_tasks[int(callback.data.split("|")[1])] = True
+    await callback.answer("Stopping...")
 
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
@@ -283,7 +282,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.70 Combined Edition is Online!")
+        print("LOG: V8.71 Online (Anti-Freeze Edition)!")
         await idle()
 
 if __name__ == "__main__":
