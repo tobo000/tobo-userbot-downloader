@@ -8,33 +8,27 @@ from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv # NEW: Requirement
+from dotenv import load_dotenv
 
 # --- SECURE CONFIGURATION ---
-load_dotenv() # Load variables from .env file
-
+load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
-# Critical Check: Ensure credentials exist
 if not API_ID or not API_HASH:
-    print("❌ FATAL ERROR: API_ID or API_HASH not found in .env file!")
+    print("❌ FATAL: Check your .env file for API_ID and API_HASH!")
     exit(1)
 
-# API_ID must be an integer for Pyrogram
-API_ID = int(API_ID)
-
-app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
-# --- PROGRESS & UI HELPERS ---
+# --- HELPERS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = current * 100 / total
-    finished = int(pct / 10)
-    return f"[{'█' * finished}{'░' * (10 - finished)}] {pct:.1f}%"
+    return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -50,7 +44,6 @@ async def edit_status(message, text, last_update_time, force=False):
             last_update_time[0] = now
         except: pass
 
-# --- VIDEO ENGINES ---
 def get_video_meta(video_path):
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
@@ -60,13 +53,6 @@ def get_video_meta(video_path):
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
         return duration, v['width'], v['height']
     except: return 0, 0, 0
-
-def optimize_video(path):
-    out = path + "_ready.mp4"
-    try:
-        subprocess.run(['ffmpeg', '-i', path, '-c', 'copy', '-movflags', 'faststart', out, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
-        if os.path.exists(out): os.replace(out, path)
-    except: pass
 
 def download_nitro(url, path, headers, size, segs=4):
     chunk = size // segs
@@ -85,7 +71,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# ADVANCED PAGINATION CRAWLER
+# SCRAPER ENGINES (Title & Pagination)
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -105,8 +91,7 @@ def scrape_album_details(url):
 def get_all_profile_content(username):
     headers = {'User-Agent': 'Mozilla/5.0'}
     all_links = []
-    tabs = ["", "/reposts"]
-    for tab in tabs:
+    for tab in ["", "/reposts"]:
         page = 1
         while True:
             url = f"https://www.erome.com/{username}{tab}?page={page}"
@@ -116,23 +101,22 @@ def get_all_profile_content(username):
                 soup = BeautifulSoup(res.text, 'html.parser')
                 links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href']]
                 if not links: break
-                for l in links:
-                    full = l if l.startswith('http') else 'https://www.erome.com' + l
-                    all_links.append(full)
-                next_btn = soup.find("a", string=lambda x: x and "Next" in x)
-                if not next_btn: break
+                for l in links: all_links.append(l if l.startswith('http') else 'https://www.erome.com' + l)
+                if not soup.find("a", string=lambda x: x and "Next" in x): break
                 page += 1
             except: break
     return list(dict.fromkeys(all_links))
 
 # ==========================================
-# DELIVERY ENGINE
+# DELIVERY ENGINE (V8.35: No thread_id)
 # ==========================================
-async def process_album(client, message, url, thread_id):
+async def process_album(client, message, url):
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
+    
     album_id = url.rstrip('/').split('/')[-1]
-    status = await client.send_message(message.chat.id, f"🔍 Processing: **{title}**", message_thread_id=thread_id)
+    # Reply to the command to stay in the correct Topic
+    status = await client.send_message(message.chat.id, f"🔍 Processing: **{title}**", reply_to_message_id=message.id)
     last_edit = [0]
 
     if photos:
@@ -145,7 +129,7 @@ async def process_album(client, message, url, thread_id):
                 with open(filepath, 'wb') as f: f.write(r.content)
                 p_files.append(filepath)
                 if len(p_files) == 10 or p_idx == len(photos):
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], message_thread_id=thread_id)
+                    await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], reply_to_message_id=message.id)
                     for pf in p_files: os.remove(pf) if os.path.exists(pf) else None
                     p_files = []
             except: pass
@@ -158,31 +142,33 @@ async def process_album(client, message, url, thread_id):
             try:
                 head = session.head(v_url, headers=headers, allow_redirects=True)
                 size = int(head.headers.get('content-length', 0))
-                await edit_status(status, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\nSize: {get_human_size(size)}", last_edit, force=True)
+                await edit_status(status, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\n{get_human_size(size)}", last_edit, force=True)
+                
                 if size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, size)
                 else:
                     r = session.get(v_url, stream=True)
                     with open(filepath, 'wb') as f:
-                        for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
+                        for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
+                
                 dur, w, h = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
-                await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}", supports_streaming=True, message_thread_id=thread_id)
+                await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}", supports_streaming=True, reply_to_message_id=message.id)
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
+
     await status.delete()
-    await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", message_thread_id=thread_id)
+    await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
 
 # ==========================================
-# USER COMMANDS
+# COMMAND HANDLERS
 # ==========================================
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
-    thread_id = getattr(message, "message_thread_id", None)
-    for url in urls: await process_album(client, message, url, thread_id)
+    for url in urls: await process_album(client, message, url)
     try: await message.delete()
     except: pass
 
@@ -190,20 +176,19 @@ async def dl_handler(client, message):
 async def user_handler(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    thread_id = getattr(message, "message_thread_id", None)
-    crawl_msg = await message.reply(f"🕵️‍♂️ **Infinite Crawler:** Scanning `{username}`...")
+    crawl_msg = await message.reply(f"🕵️‍♂️ **Crawler:** Scanning `{username}`...")
     urls = get_all_profile_content(username)
     if not urls: return await crawl_msg.edit(f"❌ No content for `{username}`.")
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums. Starting sequential archive...")
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums. Sequential mode active...")
     for url in urls:
-        await process_album(client, message, url, thread_id)
+        await process_album(client, message, url)
         await asyncio.sleep(2)
-    await message.reply(f"🏆 Profile `{username}` fully archived!")
+    await message.reply(f"🏆 Profile `{username}` complete!")
     await crawl_msg.delete()
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.34 Secure is Online!")
+        print("LOG: Tobo Pro V8.35 Online (Topic-Fixed)!")
         await idle()
 
 if __name__ == "__main__":
