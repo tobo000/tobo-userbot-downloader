@@ -10,8 +10,8 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURATION ---
-API_ID = 1234567 
-API_HASH = "your_hash"
+API_ID = 34684478 
+API_HASH = 3ee498f0d6b06bf3fa8a5b102af12942
 
 app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
