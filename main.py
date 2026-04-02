@@ -49,7 +49,7 @@ def mark_processed(url):
     except: pass
     conn.close()
 
-# --- HELPERS ---
+# --- HELPERS (Animation & Progress) ---
 def create_progress_bar(current, total):
     if total == 0: return "[░░░░░░░░░░] 0%"
     pct = current * 100 / total
@@ -63,7 +63,7 @@ def get_human_size(num):
 
 async def progress_callback(current, total, client, message, start_time, action_text):
     now = time.time()
-    if now - start_time[0] > 4: # Update every 4s to prevent FloodWait
+    if now - start_time[0] > 4: 
         bar = create_progress_bar(current, total)
         try:
             await message.edit_text(f"🚀 **{action_text}**\n\n{bar}\n📦 {get_human_size(current)} / {get_human_size(total)}")
@@ -139,18 +139,17 @@ async def process_single_album(client, message, url, topic_id):
     album_id = url.rstrip('/').split('/')[-1]
     status = await client.send_message(message.chat.id, f"📥 **Preparing:** `{title}`", message_thread_id=topic_id)
 
-    # Process Photos
-    photo_paths = []
-    for i, p_url in enumerate(photos, 1):
-        path = os.path.join(DOWNLOAD_DIR, f"{album_id}_p{i}.jpg")
-        if await download_file(p_url, path): photo_paths.append(path)
-        if len(photo_paths) == 10 or i == len(photos):
-            if photo_paths:
-                await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
-                for p in photo_paths: os.remove(p)
-                photo_paths = []
+    if photos:
+        photo_paths = []
+        for i, p_url in enumerate(photos, 1):
+            path = os.path.join(DOWNLOAD_DIR, f"{album_id}_p{i}.jpg")
+            if await download_file(p_url, path): photo_paths.append(path)
+            if len(photo_paths) == 10 or i == len(photos):
+                if photo_paths:
+                    await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
+                    for p in photo_paths: os.remove(p)
+                    photo_paths = []
 
-    # Process Videos
     if videos:
         for i, v_url in enumerate(videos, 1):
             path = os.path.join(DOWNLOAD_DIR, f"{album_id}_v{i}.mp4")
@@ -187,9 +186,10 @@ async def user_cmd(client, message):
     cancel_tasks[chat_id] = False
     topic_id = getattr(message, "message_thread_id", None)
 
+    # FIXED: Pyrogram uses 'callback_data'
     status = await message.reply(
         f"🕵️‍♂️ **Initializing Scanner...**",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", data=f"stop_{chat_id}")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_data=f"stop_{chat_id}")]])
     )
     
     urls = await get_all_profile_links(username, status)
@@ -216,7 +216,7 @@ async def stop_callback(client, callback_query: CallbackQuery):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.91 Master Edition is Online!")
+        print("LOG: V8.92 Master Edition (Final Button Fix) is Online!")
         await idle()
 
 if __name__ == "__main__":
