@@ -57,20 +57,31 @@ def get_video_meta(video_path):
     except: return 0, 1280, 720, False
 
 # ==========================================
-# ADVANCED SCANNER
+# ADVANCED SCANNER WITH ANIMATION
 # ==========================================
 async def full_scan_profile(username, status_msg):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0',
-        'Referer': 'https://www.erome.com/'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
     results = {"posts": [], "reposts": []}
+    
+    # Animation frames
+    frames = ["🔍", "🔎", "⚡", "✨", "📡", "🚀"]
+    frame_idx = 0
     
     for tab in ["", "/reposts"]:
         page = 1
         key = "posts" if tab == "" else "reposts"
         while True:
-            await status_msg.edit_text(f"🕵️‍♂️ **Scanning {username}...**\n\n📝 Posts: `{len(results['posts'])}` \n🔁 Reposts: `{len(results['reposts'])}` \n\n*Currently: Page {page} of {key}...*")
+            # Update Animation
+            icon = frames[frame_idx % len(frames)]
+            frame_idx += 1
+            
+            await status_msg.edit_text(
+                f"{icon} **Scanning {username}...**\n\n"
+                f"📝 Posts found: `{len(results['posts'])}` \n"
+                f"🔁 Reposts found: `{len(results['reposts'])}` \n\n"
+                f"*Currently: Analyzing {key} (Page {page})*"
+            )
+            
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
@@ -93,7 +104,7 @@ async def full_scan_profile(username, status_msg):
                 if added == 0: break
                 if not soup.find("a", string=re.compile(r"Next", re.I)): break
                 page += 1
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
             except: break
     return results
 
@@ -121,7 +132,7 @@ async def process_album(client, message, url):
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     album_id = url.rstrip('/').split('/')[-1]
-    status = await client.send_message(message.chat.id, f"🔍 **Analyzing:** `{title}`", reply_to_message_id=message.id)
+    status = await client.send_message(message.chat.id, f"📥 **Analyzing:** `{title}`", reply_to_message_id=message.id)
     last_edit = [0]
 
     if photos:
@@ -147,14 +158,12 @@ async def process_album(client, message, url):
                 with session.get(v_url, stream=True, timeout=60) as r:
                     with open(filepath, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
-                
                 if not os.path.exists(filepath): continue
                 dur, w, h, has_audio = get_video_meta(filepath)
                 if not has_audio:
                     temp = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if os.path.exists(temp): os.remove(filepath); os.rename(temp, filepath)
-                
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 await client.send_video(message.chat.id, video=filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, caption=f"🎬 **{title}**", supports_streaming=True, reply_to_message_id=message.id)
@@ -169,29 +178,29 @@ async def process_album(client, message, url):
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     
-    # --- NEW: SMART LINK PARSER ---
+    # Smart Link Parser
     input_data = message.command[1].strip()
     if "erome.com/" in input_data:
-        # Extract username from link (e.g., https://www.erome.com/6xyy -> 6xyy)
         username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0]
     else:
         username = input_data
 
-    msg = await message.reply(f"🕵️‍♂️ **Initializing Scanner for:** `{username}`...")
+    msg = await message.reply(f"🛰 **Connecting to profile:** `{username}`...")
     
+    # Full Scan with Animation
     results = await full_scan_profile(username, msg)
     data_cache[username] = results
     
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📥 Download Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
-        [InlineKeyboardButton(f"🔁 Download Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
+        [InlineKeyboardButton(f"📥 Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
+        [InlineKeyboardButton(f"🔁 Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
     ])
     
     await msg.edit_text(
-        f"👤 **User:** `{username}`\n\n"
-        f"📝 **Original Posts:** `{len(results['posts'])}` \n"
-        f"🔁 **Reposted Albums:** `{len(results['reposts'])}` \n\n"
-        f"Select an option to start archiving:",
+        f"👤 **User Profile:** `{username}`\n\n"
+        f"📝 **Original Posts:** `{len(results['posts'])}` items\n"
+        f"🔁 **Reposted Albums:** `{len(results['reposts'])}` items\n\n"
+        f"Select what to archive:",
         reply_markup=buttons
     )
 
@@ -204,7 +213,7 @@ async def handle_dl(client, callback: CallbackQuery):
     if not urls:
         return await callback.answer("❌ No items found.", show_alert=True)
     
-    await callback.message.edit_text(f"🚀 **Archiving {len(urls)} {key} for `{username}`...**")
+    await callback.message.edit_text(f"🚀 **Archiving {len(urls)} {key}...**")
     for url in urls:
         await process_album(client, callback.message, url)
         await asyncio.sleep(2)
@@ -212,7 +221,7 @@ async def handle_dl(client, callback: CallbackQuery):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.55 (Link & Username Support) Online!")
+        print("LOG: Tobo Pro V8.56 Online (Scan Animation)!")
         await idle()
 
 if __name__ == "__main__":
