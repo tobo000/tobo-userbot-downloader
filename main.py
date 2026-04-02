@@ -22,8 +22,7 @@ if not API_ID or not API_HASH:
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR): 
-    os.makedirs(DOWNLOAD_DIR)
+if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
 # --- HELPERS ---
@@ -47,25 +46,24 @@ async def edit_status(message, text, last_update_time, force=False):
         except: pass
 
 def get_video_meta(video_path):
-    if not os.path.exists(video_path): return 0, 0, 0
+    if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+        return 0, 1280, 720 # Fallback default
     try:
-        # ទាញយក Metadata ពិតប្រាកដ (Resolution & Duration)
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
-        duration = int(float(data['format']['duration']))
+        duration = int(float(data.get('format', {}).get('duration', 0)))
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
-        return duration, v['width'], v['height']
-    except Exception as e:
-        print(f"Metadata Error: {e}")
-        return 0, 0, 0
+        return duration, v.get('width', 1280), v.get('height', 720)
+    except:
+        return 0, 1280, 720 # Default to HD if ffprobe fails
 
 def download_nitro(url, path, headers, size, segs=4):
     chunk = size // segs
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
         try:
-            with session.get(url, headers=h, stream=True, timeout=30) as r:
+            with session.get(url, headers=h, stream=True, timeout=60) as r:
                 with open(pp, 'wb') as f:
                     for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
         except: pass
@@ -84,10 +82,10 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V8.45: High-Res Selector)
+# SCRAPER ENGINE (V8.46)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -98,27 +96,17 @@ def scrape_album_details(url):
         p_l = list(dict.fromkeys([i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))]))
         p_l = [x if x.startswith('http') else 'https:' + x for x in p_l if x]
         
-        # --- HIGH-RES VIDEOS ---
+        # --- VIDEOS (Deep Scan) ---
         v_candidates = []
-        # រុករកគ្រប់ Video sources
         for tag in soup.find_all(['video', 'source', 'a']):
             src = tag.get('src') or tag.get('data-src') or tag.get('href')
             if src and ".mp4" in src.lower():
                 v_candidates.append(src if src.startswith('http') else 'https:' + src)
-        
-        # Regex បន្ថែមក្នុងករណីមាន Link លាក់ក្នុង Script
         v_candidates.extend(re.findall(r'https?://[^\s"\'>]+\.mp4', res.text))
-        v_candidates = list(dict.fromkeys(v_candidates))
-
-        # សម្រាំងយកតែ Link ដែលច្បាស់ជាងគេ (HD/1080/720)
-        v_l = []
-        # Group videos by their base name to avoid downloading low-res duplicates
-        for v_url in v_candidates:
-            if "erome.com" in v_url:
-                v_l.append(v_url)
         
-        # Sort so that links with '1080' or '720' or 'high' are prioritized if duplicates exist
-        v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x), reverse=False)
+        # Filter and prioritize High-Resolution
+        v_l = list(dict.fromkeys([v for v in v_candidates if "erome.com" in v]))
+        v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
 
         print(f"DEBUG: Found {len(p_l)} photos and {len(v_l)} videos in {album_title}")
         return album_title, p_l, v_l
@@ -144,7 +132,7 @@ def get_all_profile_content(username):
     return list(dict.fromkeys(all_links))
 
 # ==========================================
-# DELIVERY ENGINE (V8.45: High Resolution)
+# DELIVERY ENGINE
 # ==========================================
 async def process_album(client, message, url):
     title, photos, videos = scrape_album_details(url)
@@ -167,38 +155,36 @@ async def process_album(client, message, url):
                 if os.path.exists(filepath): p_files.append(filepath)
                 if len(p_files) == 10 or p_idx == len(photos):
                     await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], reply_to_message_id=message.id)
-                    for pf in p_files: os.remove(pf)
+                    for pf in p_files: 
+                        if os.path.exists(pf): os.remove(pf)
                     p_files = []
             except: pass
 
-    # 2. Videos (Highest Resolution Delivery)
+    # 2. Videos (Reliable High-Res Delivery)
     if videos:
         video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
             v_name = v_url.split('/')[-1].split('?')[0]
             if ".mp4" not in v_name.lower(): v_name += ".mp4"
             filepath = os.path.join(DOWNLOAD_DIR, f"{album_id}_{v_name}")
-            headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': url}
             try:
-                head = session.head(v_url, headers=headers, allow_redirects=True, timeout=10)
+                head = session.head(v_url, headers=headers, allow_redirects=True, timeout=15)
                 size = int(head.headers.get('content-length', 0))
                 await edit_status(status, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\nSize: {get_human_size(size)}", last_edit, force=True)
                 
-                # បច្ចេកទេសទាញយកលឿន (Nitro)
                 if size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, size)
                 else:
-                    r = session.get(v_url, stream=True, timeout=30)
+                    r = session.get(v_url, headers=headers, stream=True, timeout=60)
                     with open(filepath, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
                 
-                if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+                if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000:
                     continue
 
-                # ទាញយក Resolution ពិតប្រាកដសម្រាប់ផ្ញើចេញជា Video (មិនមែន Document)
                 dur, w, h = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
-                # បង្កើត Thumbnail គុណភាពខ្ពស់
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 final_thumb = thumb if os.path.exists(thumb) else None
 
@@ -209,41 +195,20 @@ async def process_album(client, message, url):
 
                 if len(video_payload) == 10 or v_idx == len(videos):
                     if video_payload:
-                        await edit_status(status, f"📤 **{title}**\nUploading HD video batch...", last_edit, force=True)
-                        m_group = [
-                            InputMediaVideo(
-                                v["path"], 
-                                thumb=v["thumb"], 
-                                width=v["w"], 
-                                height=v["h"], 
-                                duration=v["dur"], 
-                                supports_streaming=True, 
-                                caption=v["cap"]
-                            ) for v in video_payload
-                        ]
+                        await edit_status(status, f"📤 **{title}**\nUploading video batch...", last_edit, force=True)
+                        m_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"]) for v in video_payload]
                         try:
                             await client.send_media_group(message.chat.id, m_group, reply_to_message_id=message.id)
                         except:
                             for v in video_payload:
-                                try:
-                                    await client.send_video(
-                                        chat_id=message.chat.id, 
-                                        video=v["path"], 
-                                        thumb=v["thumb"], 
-                                        width=v["w"], 
-                                        height=v["h"], 
-                                        duration=v["dur"], 
-                                        supports_streaming=True, 
-                                        caption=v["cap"], 
-                                        reply_to_message_id=message.id
-                                    )
+                                try: await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"], reply_to_message_id=message.id)
                                 except: pass
-                        
                         for v in video_payload:
                             if os.path.exists(v["path"]): os.remove(v["path"])
                             if v["thumb"] and os.path.exists(v["thumb"]): os.remove(v["thumb"])
                         video_payload = []
-            except: pass
+            except Exception as e:
+                print(f"Upload Error: {e}")
 
     await status.delete()
     await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
@@ -265,7 +230,7 @@ async def user_handler(client, message):
     crawl_msg = await message.reply(f"🕵️‍♂️ **Crawler:** Scanning `{username}`...")
     urls = get_all_profile_content(username)
     if not urls: return await crawl_msg.edit(f"❌ No content for `{username}`.")
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums for `{username}`. Starting Download...")
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums. Starting...")
     for url in urls:
         await process_album(client, message, url)
         await asyncio.sleep(2)
@@ -277,7 +242,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.45 Ready (HD Video Fix)!")
+        print("LOG: Tobo Pro V8.46 Ready (Robust Metadata Fix)!")
         await idle()
 
 if __name__ == "__main__":
