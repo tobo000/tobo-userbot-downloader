@@ -38,7 +38,7 @@ def get_video_meta(video_path):
 
 async def async_download(url, path, referer):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         'Referer': referer
     }
     try:
@@ -52,78 +52,92 @@ async def async_download(url, path, referer):
     return False
 
 # ==========================================
-# ROBUST ASYNC SCANNER (V8.58)
+# STEALTH SCANNER (V8.59)
 # ==========================================
 async def full_scan_profile(username, status_msg):
-    # Headers ថ្មី ដូចមនុស្សប្រើ Browser ចុងក្រោយបំផុត
+    # Stealth Headers
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.google.com/',
-        'Connection': 'keep-alive'
+        'Referer': 'https://www.erome.com/',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
     }
+    
     results = {"posts": [], "reposts": []}
-    icons = ["🔍", "🔎", "📡", "⚡"]
+    frames = ["🔍", "🔎", "🛰", "📡"]
     
     async with aiohttp.ClientSession(headers=headers) as session:
         for tab in ["", "/reposts"]:
             page = 1
             key = "posts" if tab == "" else "reposts"
             while True:
-                icon = icons[page % len(icons)]
+                icon = frames[page % len(frames)]
                 await status_msg.edit_text(
-                    f"{icon} **Scanning {username}...**\n\n"
-                    f"📝 Posts: `{len(results['posts'])}` \n"
-                    f"🔁 Reposts: `{len(results['reposts'])}` \n\n"
-                    f"*Reading {key} - Page {page}...*"
+                    f"{icon} **Stealth Scanning {username}...**\n\n"
+                    f"📝 Posts found: `{len(results['posts'])}` \n"
+                    f"🔁 Reposts found: `{len(results['reposts'])}` \n\n"
+                    f"*Analyzing {key} - Page {page}...*"
                 )
                 
                 url = f"https://www.erome.com/{username}{tab}?page={page}"
                 try:
                     async with session.get(url, timeout=20) as res:
-                        if res.status == 403:
-                            await status_msg.edit_text(f"❌ **Blocked by Website (403 Forbidden).**\nTry again later or change IP.")
-                            return results
-                        if res.status != 200: break
+                        if res.status != 200: 
+                            break
                         
                         html = await res.text()
                         soup = BeautifulSoup(html, 'html.parser')
                         
-                        # កែសម្រួល selector ដើម្បីឱ្យចាប់យក Link បានកាន់តែច្បាស់
+                        # New Robust Link Finding Logic
                         found_links = []
+                        # Look for all album links that start with /a/
                         for a in soup.find_all("a", href=True):
                             href = a['href']
-                            # យកតែ Link អាល់ប៊ុម (/a/xxxx) ដែលមិនមែនជា Link ផ្សាយពាណិជ្ជកម្ម
-                            if "/a/" in href and "erome.com" not in href and not any(x in href for x in ["facebook", "twitter", "share"]):
-                                full_link = 'https://www.erome.com' + href if href.startswith('/') else href
-                                found_links.append(full_link)
+                            if "/a/" in href and "erome.com" not in href and not any(x in href.lower() for x in ["share", "facebook", "twitter", "reddit", "whatsapp"]):
+                                full_link = f"https://www.erome.com{href}" if href.startswith("/") else href
+                                if full_link not in results[key]:
+                                    found_links.append(full_link)
                         
-                        if not found_links: break
+                        if not found_links:
+                            # ជួនកាល Link នៅក្នុង Div class album-link
+                            for div in soup.find_all("div", class_="album-link"):
+                                a_tag = div.find("a", href=True)
+                                if a_tag:
+                                    href = a_tag['href']
+                                    full_link = f"https://www.erome.com{href}" if href.startswith("/") else href
+                                    if full_link not in results[key]:
+                                        found_links.append(full_link)
+
+                        if not found_links: 
+                            break # No more albums found on this page
                         
-                        added_count = 0
-                        for link in found_links:
-                            if link not in results[key]:
-                                results[key].append(link)
-                                added_count += 1
+                        results[key].extend(list(dict.fromkeys(found_links)))
                         
-                        if added_count == 0: break # End of content
-                        
-                        # ឆែកមើលប៊ូតុង Next
-                        if not soup.find("a", string=re.compile(r"Next", re.I)): break
-                        
+                        # Check for Next Button
+                        next_btn = soup.find("a", string=re.compile(r"Next", re.I))
+                        if not next_btn:
+                            break
+                            
                         page += 1
-                        await asyncio.sleep(1) # បន្ថែមការសម្រាកដើម្បីកុំឱ្យគេ Block
+                        await asyncio.sleep(0.5) 
                 except Exception as e:
-                    print(f"Error: {e}")
+                    print(f"Scan error: {e}")
                     break
     return results
 
 # ==========================================
-# DELIVERY & HANDLERS
+# DELIVERY ENGINE
 # ==========================================
 async def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url) as r:
@@ -169,40 +183,43 @@ async def process_album(client, message, url):
                 os.remove(path); os.remove(thumb) if os.path.exists(thumb) else None
     await status.delete()
 
+# ==========================================
+# COMMAND HANDLERS
+# ==========================================
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     input_data = message.command[1].strip()
     username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
     
-    msg = await message.reply(f"🛰 **Scanning profile:** `{username}`...")
+    msg = await message.reply(f"🛰 **Initializing Stealth Scanner...**")
     results = await full_scan_profile(username, msg)
     
     if not results["posts"] and not results["reposts"]:
-        return # Message already updated in full_scan_profile if error
-        
+        return await msg.edit_text(f"❌ **No content found.**\nThis user might be private or empty.")
+
     data_cache[username] = results
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"📥 Download Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
         [InlineKeyboardButton(f"🔁 Download Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
     ])
-    await msg.edit_text(f"👤 **User:** `{username}`\n📝 Posts: `{len(results['posts'])}` | 🔁 Reposts: `{len(results['reposts'])}`", reply_markup=buttons)
+    await msg.edit_text(f"👤 **User Profile:** `{username}`\n\n📝 Original Posts: `{len(results['posts'])}` items\n🔁 Reposts: `{len(results['reposts'])}` items\n\nSelect an option to archive:", reply_markup=buttons)
 
 @app.on_callback_query(filters.regex(r"^dl_(p|r)\|"))
 async def handle_dl(client, callback: CallbackQuery):
     action, username = callback.data.split("|")
     key = "posts" if action == "dl_p" else "reposts"
     urls = data_cache.get(username, {}).get(key, [])
-    if not urls: return await callback.answer("❌ Empty.", show_alert=True)
-    await callback.message.edit_text(f"🚀 Archiving `{username}` {key}...")
+    if not urls: return await callback.answer("❌ List is empty.", show_alert=True)
+    await callback.message.edit_text(f"🚀 **Starting Archive:** `{len(urls)}` items from `{username}` ({key})...")
     for url in urls:
         await process_album(client, callback.message, url)
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
     await callback.message.reply(f"🏆 Archive complete for {username}!")
 
 async def main():
     async with app:
-        print("LOG: V8.58 Online!")
+        print("LOG: Tobo Pro V8.59 (Stealth) Online!")
         await idle()
 
 if __name__ == "__main__":
