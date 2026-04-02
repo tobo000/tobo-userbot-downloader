@@ -10,9 +10,12 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
 
-# --- CONFIGURATION ---
-API_ID = 34684478 
-API_HASH = 3ee498f0d6b06bf3fa8a5b102af12942
+# Load the .env file
+load_dotenv()
+
+# Use the values from .env
+API_ID = int(os.getenv("API_ID")) # Convert to integer
+API_HASH = os.getenv("API_HASH")
 
 app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
