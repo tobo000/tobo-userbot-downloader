@@ -9,6 +9,7 @@ import sqlite3
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import MessageNotModified
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -24,7 +25,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE & AUTO-SYNC (Your New Update) ---
+# --- 1. DATABASE & AUTO-SYNC (Original Logic) ---
 DB_NAME = "bot_archive.db"
 
 def init_db():
@@ -43,12 +44,10 @@ def is_processed(url):
     return res is not None
 
 def git_sync():
-    """Backup to GitHub"""
     try:
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "Auto-update memory database"], check=True)
+        subprocess.run(["git", "commit", "-m", "Update database"], check=True)
         subprocess.run(["git", "push"], check=True)
-        print("LOG: GitHub Sync Complete.")
     except: pass
 
 def mark_processed(url):
@@ -61,7 +60,7 @@ def mark_processed(url):
     except: pass
     conn.close()
 
-# --- 2. HELPERS (Original) ---
+# --- 2. HELPERS (Original Logic with Fix) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -73,14 +72,21 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
+async def edit_status_safe(message, text):
+    """[FIX] Prevents 400 MESSAGE_NOT_MODIFIED error"""
+    try:
+        await message.edit_text(text)
+    except MessageNotModified:
+        pass # Ignore if text is the same
+    except Exception:
+        pass
+
 async def edit_progress_msg(current, total, status_msg, last_update, action_text):
     now = time.time()
     if now - last_update[0] > 5: 
         bar = create_progress_bar(current, total)
-        try:
-            await status_msg.edit_text(f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
-            last_update[0] = now
-        except: pass
+        await edit_status_safe(status_msg, f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
+        last_update[0] = now
 
 def get_video_meta(video_path):
     try:
@@ -148,7 +154,8 @@ async def scan_all_content(username, status_msg):
     for tab in ["", "/reposts"]:
         page = 1
         while True:
-            await status_msg.edit_text(f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_links)}` items")
+            # [FIX] Safe edit to prevent crash
+            await edit_status_safe(status_msg, f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_links)}` items\n📄 Page: {page}")
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
@@ -166,21 +173,17 @@ async def scan_all_content(username, status_msg):
     return all_links
 
 # ==========================================
-# DELIVERY ENGINE (Original Flow)
+# DELIVERY ENGINE (Original Logic)
 # ==========================================
 async def process_album(client, message, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(url): return True
-
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return False
-    
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
-    # FIXED: Use reply for automatic Topic support
     status = await message.reply_text(f"📥 **[{current}/{total}]** Preparing: `{title}`")
-
     if photos:
         p_paths = []
         for i, p_url in enumerate(photos, 1):
@@ -191,11 +194,10 @@ async def process_album(client, message, url, username, current, total):
                 await message.reply_media_group([InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_paths])
                 for pf in p_paths: os.remove(pf)
                 p_paths = []
-
     if videos:
         for i, v_url in enumerate(videos, 1):
             filepath = os.path.join(user_folder, f"{album_id}_v{i}.mp4")
-            headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
+            headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
             try:
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
@@ -204,21 +206,17 @@ async def process_album(client, message, url, username, current, total):
                     download_nitro(v_url, filepath, headers, size)
                 else:
                     await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {i}")
-                
                 dur, w, h, audio = get_video_meta(filepath)
                 if not audio:
                     temp = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     os.remove(filepath); os.rename(temp, filepath)
-                
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
                 start_time = [time.time()]
                 await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=progress_callback, progress_args=(client, status, start_time, "Uploading Video"))
                 os.remove(filepath); os.remove(thumb)
             except: pass
-    
     mark_processed(url) 
     await status.delete()
     return True
@@ -232,24 +230,20 @@ async def user_cmd(client, message):
     username = message.command[1].strip()
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False 
-    
     msg = await message.reply(f"🛰 **Scanning profile: {username}...**")
     all_urls = await scan_all_content(username, msg)
     if not all_urls: return await msg.edit_text("❌ No items found.")
-    
     total = len(all_urls)
     await msg.edit_text(f"✅ Found: `{total}`. Starting archive...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
-    
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, message, url, username, i, total)
-    
     await msg.delete(); await message.reply(f"🏆 Done for `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
 async def handle_stop(client, callback: CallbackQuery):
     cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("Stopping Task...")
+    await callback.answer("Stopping.")
 
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
@@ -262,7 +256,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.91 (Original Power + Fixes) Online!")
+        print("LOG: Tobo Master V8.92 (Safe UI Fix) Online!")
         await idle()
 
 if __name__ == "__main__":
