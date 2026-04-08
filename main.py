@@ -6,28 +6,31 @@ import subprocess
 import json
 import re
 import sqlite3
-import random
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters, idle, errors
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import MessageNotModified
+from pyrogram.errors import MessageNotModified, FloodWait
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION (Keep your Setup) ---
+# --- CONFIGURATION (Keep your original Setup) ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
+sudo_raw = os.getenv("SUDO_USERS", "")
+SUDO_USERS = [int(x.strip()) for x in sudo_raw.split(",") if x.strip().isdigit()]
 
-app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
+# [FIX] Added sleep_threshold to handle Telegram flood safely
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=60)
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
 cancel_tasks = {}
+# [KEEP OLD CODE] Your original Nitro-style ThreadPool
 executor = ThreadPoolExecutor(max_workers=4)
 
-# --- 1. DATABASE & AUTO-SYNC ---
+# --- 1. DATABASE & AUTO-SYNC (Original Logic) ---
 DB_NAME = "bot_archive.db"
 
 def init_db():
@@ -46,11 +49,12 @@ def is_processed(url):
     return res is not None
 
 def git_sync():
-    """Backup to GitHub automatically"""
+    """Automatically backs up memory to GitHub"""
     try:
         subprocess.run(["git", "add", DB_NAME], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Sync DB"], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Auto-update DB"], check=True, capture_output=True)
         subprocess.run(["git", "push"], check=True, capture_output=True)
+        print("LOG: GitHub Sync Successful.")
     except: pass
 
 def mark_processed(url):
@@ -63,7 +67,7 @@ def mark_processed(url):
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS (Original Style) ---
+# --- 2. HELPERS & ANIMATIONS (Your Original Helpers) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -76,9 +80,11 @@ def get_human_size(num):
     return f"{num:.1f} TB"
 
 async def edit_status_safe(message, text):
-    try: await message.edit_text(text)
+    """Prevents 400 MESSAGE_NOT_MODIFIED error"""
+    try:
+        await message.edit_text(text)
     except MessageNotModified: pass
-    except: pass
+    except Exception: pass
 
 async def progress_callback(current, total, client, status_msg, start_time, action_text):
     now = time.time()
@@ -116,6 +122,7 @@ async def download_with_progress(url, path, headers, size, status_msg, action_te
     except: return False
 
 def download_nitro(url, path, headers, size, segs=4):
+    """[KEEP OLD CODE] Nitro multi-threaded logic"""
     chunk = size // segs
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -131,7 +138,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (Improved Link Discovery)
+# SCRAPER ENGINE (V9.02: Original Style)
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -144,8 +151,9 @@ def scrape_album_details(url):
         for tag in soup.find_all(['video', 'source']):
             src = tag.get('src') or tag.get('data-src')
             if src:
-                full = src if src.startswith('http') else 'https:' + src
-                if ".mp4" in full.lower(): v_l.append(full)
+                if src.startswith('//'): src = 'https:' + src
+                if not src.startswith('http'): src = 'https://www.erome.com' + src
+                if ".mp4" in src.lower(): v_l.append(src)
         raw_vids = re.findall(r'https?://[^\s"\'\\>]+erome\.com[^\s"\'\\>]+\.mp4', res.text)
         v_l.extend(raw_vids); v_l = list(dict.fromkeys(v_l))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
@@ -207,14 +215,17 @@ async def process_album(client, message, url, username, current, total):
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 if size > 15*1024*1024:
-                    await status.edit_text(f"📥 **[{current}/{total}]** Nitro Downloading..."); download_nitro(v_url, filepath, headers, size)
+                    await edit_status_safe(status, f"📥 **[{current}/{total}]** Nitro Downloading Video...")
+                    download_nitro(v_url, filepath, headers, size)
                 else:
                     await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {i}")
+                
                 dur, w, h, audio = get_video_meta(filepath)
                 if not audio:
                     temp = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     os.remove(filepath); os.rename(temp, filepath)
+                
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=progress_callback, progress_args=(client, status, [time.time()], "Uploading Video"))
@@ -229,13 +240,9 @@ async def process_album(client, message, url, username, current, total):
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     
-    # --- [NEW] SMART LINK & USERNAME PARSER ---
+    # [KEEP OLD] Smart Input support
     raw_input = message.command[1].strip()
-    if "erome.com/" in raw_input:
-        # Extract username from link (e.g., https://www.erome.com/Sensok -> Sensok)
-        username = raw_input.split("erome.com/")[-1].split('/')[0].split('?')[0]
-    else:
-        username = raw_input
+    username = raw_input.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in raw_input else raw_input
 
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False 
@@ -262,14 +269,15 @@ async def handle_stop(client, callback: CallbackQuery):
 @app.on_message(filters.command("dl", prefixes=".") & filters.user(SUDO_USERS))
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
-    for i, url in enumerate(urls, 1): await process_album(client, message, url, "single", i, len(urls))
+    for i, url in enumerate(urls, 1): 
+        await process_album(client, message, url, "single", i, len(urls))
     try: await message.delete()
     except: pass
 
 async def main():
     init_db()
     async with app:
-        print("LOG: V9.01 (Smart Link + Username Support) Online!")
+        print("LOG: V9.02 Final Stable Online!")
         await idle()
 
 if __name__ == "__main__":
