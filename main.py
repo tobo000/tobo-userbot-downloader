@@ -1,6 +1,7 @@
 import os
 import asyncio
-import requests
+import aiohttp
+import aiofiles
 import time
 import subprocess
 import json
@@ -9,7 +10,7 @@ import sqlite3
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle, errors
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import MessageNotModified, FloodWait, PeerIdInvalid
+from pyrogram.errors import MessageNotModified, FloodWait
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -20,19 +21,17 @@ API_HASH = os.getenv("API_HASH")
 sudo_raw = os.getenv("SUDO_USERS", "")
 SUDO_USERS = [int(x.strip()) for x in sudo_raw.split(",") if x.strip().isdigit()]
 
-# sleep_threshold helps handling long flood waits automatically
-app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=120)
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=180)
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
-session = requests.Session()
 
 cancel_tasks = {}
-# [RAM FIX] Limited to 2 workers for 1GB RAM safety
-executor = ThreadPoolExecutor(max_workers=2)
+# [RAM SURVIVAL] Strictly 1 worker for 1GB VPS
+executor = ThreadPoolExecutor(max_workers=1)
+sync_counter = 0
 
 # --- 2. DATABASE & SYNC ---
 DB_NAME = "bot_archive.db"
-processed_count = 0 # Counter for smart git sync
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -49,15 +48,16 @@ def is_processed(url):
     conn.close()
     return res is not None
 
-def git_sync_smart():
-    global processed_count
-    processed_count += 1
-    if processed_count % 5 == 0: # Only push every 5 albums to save resources
+def git_sync_heavy():
+    """Infrequent sync to prevent network hangs"""
+    global sync_counter
+    sync_counter += 1
+    if sync_counter % 20 == 0:
         try:
             subprocess.run(["git", "add", DB_NAME], capture_output=True)
-            subprocess.run(["git", "commit", "-m", "Sync DB"], capture_output=True)
+            subprocess.run(["git", "commit", "-m", "Sync Memory"], capture_output=True)
             subprocess.run(["git", "push"], capture_output=True)
-            print("LOG: Cloud backup successful.")
+            print("LOG: Cloud backup done.")
         except: pass
 
 def mark_processed(url):
@@ -66,7 +66,7 @@ def mark_processed(url):
     try:
         cursor.execute("INSERT INTO processed (url) VALUES (?)", (url,))
         conn.commit()
-        git_sync_smart()
+        git_sync_heavy()
     except: pass
     conn.close()
 
@@ -89,11 +89,21 @@ async def edit_status_safe(message, text):
 
 async def progress_callback(current, total, client, status_msg, start_time, action_text):
     now = time.time()
-    # [FLOOD FIX] Update every 7 seconds
-    if now - start_time[0] > 7: 
+    if now - start_time[0] > 10: # Long interval to prevent FloodWait
         bar = create_progress_bar(current, total)
         await edit_status_safe(status_msg, f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
         start_time[0] = now
+
+async def async_download_img(url, path):
+    """Non-blocking image download"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=30) as r:
+                if r.status == 200:
+                    async with aiofiles.open(path, mode='wb') as f:
+                        await f.write(await r.read())
+                    return True
+    except: return False
 
 def get_video_meta(video_path):
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
@@ -103,25 +113,9 @@ def get_video_meta(video_path):
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
         duration = int(float(data.get('format', {}).get('duration', 0)))
-        v = next((s for s in data['streams'] if s['codec_type'] == 'video'), {})
+        v = next((s for s in data.get('streams', []) if s['codec_type'] == 'video'), {})
         return duration, int(v.get('width', 1280)), int(v.get('height', 720)), any(s['codec_type'] == 'audio' for s in data['streams'])
     except: return 0, 1280, 720, False
-
-async def download_with_progress(url, path, headers, size, status_msg, action_text):
-    last_update = [time.time()]; downloaded = 0
-    try:
-        with requests.get(url, headers=headers, stream=True, timeout=60) as r:
-            with open(path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=1024*1024):
-                    if chunk:
-                        f.write(chunk); downloaded += len(chunk)
-                        now = time.time()
-                        if now - last_update[0] > 7:
-                            bar = create_progress_bar(downloaded, size)
-                            await edit_status_safe(status_msg, f"📥 **{action_text}**\n\n{bar}\n📦 **Progress:** {get_human_size(downloaded)}")
-                            last_update[0] = now
-        return True
-    except: return False
 
 # ==========================================
 # SCRAPER ENGINE
@@ -129,79 +123,75 @@ async def download_with_progress(url, path, headers, size, status_msg, action_te
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
-        res = session.get(url, headers=headers, timeout=20)
+        import requests
+        res = requests.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = list(dict.fromkeys([x if x.startswith('http') else 'https:' + x for x in [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))] if x]))
-        v_l = []
+        p_l = [x if x.startswith('http') else 'https:' + x for x in [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))] if x]
         raw_vids = re.findall(r'https?://[^\s"\'\\>]+erome\.com[^\s"\'\\>]+\.mp4', res.text)
-        v_l.extend(raw_vids); v_l = list(dict.fromkeys(v_l))
+        v_l = list(dict.fromkeys(raw_vids))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, p_l, v_l
     except: return "Error", [], []
 
-def get_all_profile_content_sync(username, status_msg):
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0', 'Referer': 'https://www.erome.com/'}
+def get_all_links(username):
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0'}
     all_links = []
+    import requests
     for tab in ["", "/reposts"]:
         page = 1
         while True:
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
-                res = session.get(url, headers=headers, timeout=20)
-                if res.status_code != 200: break
-                soup = BeautifulSoup(res.text, 'html.parser')
-                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
-                if not links: break
+                res = requests.get(url, headers=headers, timeout=20)
+                album_ids = re.findall(r'href=["\'](/a/[a-zA-Z0-9]+)["\']', res.text)
+                if not album_ids: break
                 found_new = 0
-                for l in links:
-                    full = 'https://www.erome.com' + l if l.startswith('/') else l
-                    if full not in all_links:
-                        all_links.append(full); found_new += 1
-                
-                asyncio.run_coroutine_threadsafe(edit_status_safe(status_msg, f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_links)}` items\n📄 Page: {page}"), asyncio.get_event_loop())
+                for aid in album_ids:
+                    f_url = "https://www.erome.com" + aid
+                    if f_url not in all_links: all_links.append(f_url); found_new += 1
                 if found_new == 0 or "Next" not in res.text: break
                 page += 1
-                time.sleep(0.8)
             except: break
     return all_links
 
 # ==========================================
-# DELIVERY ENGINE
+# DELIVERY ENGINE (The Survival Logic)
 # ==========================================
 async def process_album(client, message, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(url): return True
+
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return False
     
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
-    status = await message.reply_text(f"📥 **[{current}/{total}]** Preparing: `{title}`")
+    status = await message.reply_text(f"📥 **[{current}/{total}]** Archive: `{title}`")
     
     if photos:
         p_paths = []
         for i, p_url in enumerate(photos, 1):
             p = os.path.join(user_folder, f"img_{album_id}_{i}.jpg")
-            r = requests.get(p_url); open(p, 'wb').write(r.content); p_paths.append(p)
+            if await async_download_img(p_url, p): p_paths.append(p)
             if len(p_paths) == 10 or i == len(photos):
                 try: await message.reply_media_group([InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_paths])
                 except: pass
-                for pf in p_paths: os.remove(pf)
+                for pf in p_paths: 
+                    if os.path.exists(pf): os.remove(pf)
                 p_paths = []
 
     if videos:
         for i, v_url in enumerate(videos, 1):
             filepath = os.path.join(user_folder, f"{album_id}_v{i}.mp4")
             try:
-                headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
-                with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
-                    size = int(r.headers.get('content-length', 0))
+                # Direct download without nitro to save RAM
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(v_url, timeout=600) as r:
+                        async with aiofiles.open(filepath, mode='wb') as f:
+                            await f.write(await r.read())
                 
-                await download_with_progress(v_url, filepath, status, f"Downloading Video {i}")
-                if not os.path.exists(filepath): continue
-
                 dur, w, h, audio = get_video_meta(filepath)
                 if not audio:
                     temp = filepath + ".fix.mp4"
@@ -209,42 +199,39 @@ async def process_album(client, message, url, username, current, total):
                     os.remove(filepath); os.rename(temp, filepath)
                 
                 thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vf', 'scale=320:-1', '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                start_time = [time.time()]
-                await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=progress_callback, progress_args=(client, status, start_time, "Uploading Video"))
-                os.remove(filepath); os.remove(thumb)
+                await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True)
+                if os.path.exists(filepath): os.remove(filepath)
+                if os.path.exists(thumb): os.remove(thumb)
             except: pass
-    mark_processed(url); await status.delete(); return True
+    
+    mark_processed(url)
+    await status.delete()
+    return True
 
 # ==========================================
 # COMMAND HANDLERS
 # ==========================================
 @app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
-    try:
-        input_data = message.command[1].strip()
-        username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
-        chat_id = message.chat.id
-        cancel_tasks[chat_id] = False 
-        msg = await message.reply(f"🛰 **Scanning profile: {username}...**")
-        loop = asyncio.get_event_loop()
-        all_urls = await loop.run_in_executor(None, get_all_profile_content_sync, username, msg)
-        if not all_urls: return await msg.edit_text("❌ No items found.")
-        
-        total = len(all_urls)
-        await msg.edit_text(f"✅ Found: `{total}`. Starting archive...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
-        for i, url in enumerate(all_urls, 1):
-            if cancel_tasks.get(chat_id): break
-            await process_album(client, message, url, username, i, total)
-            await asyncio.sleep(2) # [RAM SAFETY] Give VPS time to breathe
-        await msg.delete(); await message.reply(f"🏆 Archive complete for `{username}`!")
-    except Exception as e: print(f"Error: {e}")
+    username = message.command[1].strip().split('/')[-1]
+    msg = await message.reply("🛰 **Deep Scanning Profile...**")
+    
+    loop = asyncio.get_event_loop()
+    all_urls = await loop.run_in_executor(None, get_all_links, username)
+    
+    if not all_urls: return await msg.edit_text("❌ No items.")
+    
+    total = len(all_urls)
+    await msg.edit_text(f"✅ Found: `{total}`. Archiving in Survival Mode...")
+    
+    for i, url in enumerate(all_urls, 1):
+        if cancel_tasks.get(message.chat.id): break
+        await process_album(client, message, url, username, i, total)
+        await asyncio.sleep(3) # Heavy rest for VPS
 
-@app.on_callback_query(filters.regex(r"^stop_task\|"))
-async def handle_stop(client, callback: CallbackQuery):
-    cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("Stopping.")
+    await msg.delete(); await message.reply(f"🏆 Finished `{username}`!")
 
 @app.on_message(filters.command("dl", prefixes=".") & filters.user(SUDO_USERS))
 async def dl_handler(client, message):
@@ -256,7 +243,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V9.05 Survival Master Online!")
+        print("LOG: V9.06 Rock Stable Online!")
         await idle()
 
 if __name__ == "__main__":
