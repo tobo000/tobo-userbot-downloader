@@ -25,11 +25,10 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE (Fixed Column naming) ---
+# --- 1. DATABASE ---
 def init_db():
     conn = sqlite3.connect("bot_archive.db")
     cursor = conn.cursor()
-    # ធានាថា Column ឈ្មោះ album_id ពិតប្រាកដ
     cursor.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
     conn.commit()
     conn.close()
@@ -63,13 +62,13 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
-async def progress_callback(current, total, status_msg, start_time, action_text):
+async def edit_progress_msg(current, total, status_msg, last_update, action_text):
     now = time.time()
-    if now - start_time[0] > 5:
+    if now - last_update[0] > 5:
         bar = create_progress_bar(current, total)
         try:
             await status_msg.edit_text(f"🚀 {action_text}\n\n{bar}\n📦 Size: {get_human_size(current)} / {get_human_size(total)}")
-            start_time[0] = now
+            last_update[0] = now
         except: pass
 
 def get_video_meta(video_path):
@@ -112,7 +111,7 @@ def download_nitro(url, path, headers, size, segs=4):
 # SCRAPER ENGINE
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -153,12 +152,10 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# CORE DELIVERY
+# CORE DELIVERY (Fixed Upload Logic)
 # ==========================================
-async def process_album(client, chat_id, reply_id, url, username, current, total):
+async def process_album(client, message, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
-    
-    # Check duplicate
     if is_processed(album_id): return True
 
     title, photos, videos = scrape_album_details(url)
@@ -167,9 +164,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
-    status = await client.send_message(chat_id, f"📥 **[{current}/{total}]** Preparing: `{title}`", reply_to_message_id=reply_id)
+    status = await message.reply_text(f"📥 **[{current}/{total}]** Preparing: `{title}`")
 
-    # Photos
+    # Handle Photos
     if photos:
         p_files = []
         for i, p_url in enumerate(photos, 1):
@@ -180,12 +177,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if os.path.exists(path): p_files.append(path)
                 if len(p_files) == 10 or i == len(photos):
                     if p_files:
-                        await client.send_media_group(chat_id, [InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_files], reply_to_message_id=reply_id)
+                        await message.reply_media_group([InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_files])
                         for pf in p_files: os.remove(pf)
                     p_files = []
             except: pass
 
-    # Videos
+    # Handle Videos (Fixed send_video for UserBot)
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
@@ -195,7 +192,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
-                await status.edit_text(f"📥 **[{current}/{total}]** Downloading Video {v_idx}/{len(videos)}...\n📦 Size: {get_human_size(size)}")
+                await status.edit_text(f"📥 **[{current}/{total}]** Downloading Video {v_idx}...")
                 
                 if size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, size)
@@ -204,7 +201,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         with open(filepath, 'wb') as f:
                             for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
                 
-                if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000: continue
+                if not os.path.exists(filepath) or os.path.getsize(filepath) == 0: continue
 
                 dur, w, h, has_audio = get_video_meta(filepath)
                 if not has_audio:
@@ -216,22 +213,24 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 start_time = [time.time()]
-                await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                # Using message.reply_video is more stable for Topics and UserBots
+                await message.reply_video(
+                    video=filepath, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, caption=f"🎬 {title}\n📦 {get_human_size(size)}",
-                    supports_streaming=True, reply_to_message_id=reply_id,
-                    progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
+                    supports_streaming=True,
+                    progress=progress_callback, progress_args=(client, status, start_time, f"Uploading Video {v_idx}")
                 )
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except: pass
+            except Exception as e:
+                print(f"Upload Error: {e}")
     
     mark_processed(album_id)
     await status.delete()
     return True
 
 # ==========================================
-# COMMAND HANDLERS
+# HANDLERS
 # ==========================================
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
@@ -241,19 +240,19 @@ async def user_cmd(client, message):
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False 
 
-    msg = await message.reply(f"🛰 **Checking Erome...**")
+    msg = await message.reply_text(f"🛰 **Scanning profile: {username}...**")
     all_urls = await scan_all_content(username, msg)
     if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
 
     total = len(all_urls)
-    await msg.edit_text(f"✅ Found: `{total}` items. Archiving...", 
+    await msg.edit_text(f"✅ Found: `{total}` items. Starting archive...", 
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
 
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
-        await process_album(client, chat_id, message.id, url, username, i, total)
+        await process_album(client, message, url, username, i, total)
         await asyncio.sleep(1)
-    await msg.delete(); await message.reply(f"🏆 Done for `{username}`!")
+    await msg.delete(); await message.reply_text(f"🏆 Done for `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
 async def handle_stop(client, callback: CallbackQuery):
@@ -265,14 +264,14 @@ async def handle_stop(client, callback: CallbackQuery):
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
     for i, url in enumerate(urls, 1): 
-        await process_album(client, message.chat.id, message.id, url, "general", i, len(urls))
+        await process_album(client, message, url, "general", i, len(urls))
     try: await message.delete()
     except: pass
 
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.84 Ready (SQLite Fixed)!")
+        print("LOG: V8.85 (Upload Fixed) is Online!")
         await idle()
 
 if __name__ == "__main__":
