@@ -6,7 +6,6 @@ import subprocess
 import json
 import re
 import sqlite3
-import random
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -14,12 +13,10 @@ from pyrogram.errors import MessageNotModified
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Your Pure Original Setup) ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-sudo_raw = os.getenv("SUDO_USERS", "")
-SUDO_USERS = [int(x.strip()) for x in sudo_raw.split(",") if x.strip().isdigit()]
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
@@ -28,9 +25,8 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE & AUTO-SYNC ---
+# --- 1. DATABASE ---
 DB_NAME = "bot_archive.db"
-
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -52,14 +48,10 @@ def mark_processed(url):
     try:
         cursor.execute("INSERT INTO processed (url) VALUES (?)", (url,))
         conn.commit()
-        # Auto Sync to GitHub
-        subprocess.run(["git", "add", DB_NAME], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Sync DB"], check=True, capture_output=True)
-        subprocess.run(["git", "push"], check=True, capture_output=True)
     except: pass
     conn.close()
 
-# --- 2. HELPERS ---
+# --- 2. HELPERS (Your Pure Original Helpers) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -72,7 +64,8 @@ def get_human_size(num):
     return f"{num:.1f} TB"
 
 async def edit_status_safe(message, text):
-    try: await message.edit_text(text)
+    try:
+        await message.edit_text(text)
     except MessageNotModified: pass
     except: pass
 
@@ -93,8 +86,10 @@ def get_video_meta(video_path):
         return duration, int(v.get('width', 1280)), int(v.get('height', 720)), any(s['codec_type'] == 'audio' for s in data['streams'])
     except: return 0, 1280, 720, False
 
+# --- 3. NITRO DOWNLOAD ENGINE (Your Original Logic) ---
 async def download_with_progress(url, path, headers, size, status_msg, action_text):
-    last_update = [time.time()]; downloaded = 0
+    last_update = [time.time()]
+    downloaded = 0
     try:
         with requests.get(url, headers=headers, stream=True, timeout=60) as r:
             with open(path, 'wb') as f:
@@ -117,7 +112,7 @@ def download_nitro(url, path, headers, size, segs=4):
             with open(pp, 'wb') as f:
                 for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
     with ThreadPoolExecutor(max_workers=segs) as ex:
-        for i in range(segs): ex.submit(dl_part, i*chunk, (i+1)*chunk-1 if i < size-1 else size-1, i)
+        for i in range(segs): ex.submit(dl_part, i*chunk, (i+1)*chunk-1 if i < size-1 else size - 1, i)
     with open(path, 'wb') as f:
         for i in range(segs):
             pp = f"{path}.p{i}"
@@ -125,10 +120,10 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# SUPER STEALTH SCRAPER (V8.98)
+# SCRAPER ENGINE (Your Original Style)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36', 'Referer': 'https://www.erome.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -138,53 +133,40 @@ def scrape_album_details(url):
         for tag in soup.find_all(['video', 'source']):
             src = tag.get('src') or tag.get('data-src')
             if src:
-                if src.startswith('//'): src = 'https:' + src
-                if not src.startswith('http'): src = 'https://www.erome.com' + src
-                if ".mp4" in src.lower(): v_l.append(src)
-        raw_vids = re.findall(r'https?://[^\s"\'\\>]+erome\.com[^\s"\'\\>]+\.mp4', res.text)
-        v_l.extend(raw_vids); v_l = list(dict.fromkeys(v_l))
+                full = src if src.startswith('http') else 'https:' + src
+                if ".mp4" in full.lower(): v_l.append(full)
+        v_l = list(dict.fromkeys(v_l))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, p_l, v_l
     except: return "Error", [], []
 
-async def scan_all_content(username, status_msg):
-    username = username.split('/')[-1].split('?')[0]
+def get_all_profile_content(username, status_msg):
+    """Your original scanning logic with small fix for 'all_links' variable"""
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0', 'Referer': 'https://www.erome.com/'}
     all_links = []
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ]
-    
     for tab in ["", "/reposts"]:
         page = 1
         while True:
-            await edit_status_safe(status_msg, f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_links)}` items\n📄 Page: {page}")
+            # Sync status edit
             url = f"https://www.erome.com/{username}{tab}?page={page}"
-            headers = {'User-Agent': random.choice(user_agents), 'Referer': 'https://www.google.com/'}
             try:
                 res = session.get(url, headers=headers, timeout=20)
-                print(f"LOG: Scanning {url} - Status: {res.status_code}") # មើលក្នុង Terminal
-                
-                if res.status_code == 403:
-                    await status_msg.reply_text("❌ **Access Denied (403)!**\nErome blocked your IP. Please try again later.")
-                    return all_links
-                
                 if res.status_code != 200: break
-                
-                # Use REGEX to find all album IDs
-                album_ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
-                if not album_ids: break
+                soup = BeautifulSoup(res.text, 'html.parser')
+                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
+                if not links: break
                 
                 found_new = 0
-                for aid in album_ids:
-                    f_url = f"https://www.erome.com/a/{aid}"
-                    if f_url not in all_links:
-                        all_links.append(f_url); found_new += 1
+                for l in links:
+                    full = 'https://www.erome.com' + l if l.startswith('/') else l
+                    if full not in all_links:
+                        all_links.append(full)
+                        found_new += 1
                 
-                if found_new == 0 or "Next" not in res.text: break
+                if found_new == 0: break
+                if "Next" not in res.text: break
                 page += 1
-                await asyncio.sleep(1) # Slow down to stay stealthy
+                time.sleep(0.5)
             except: break
     return all_links
 
@@ -196,10 +178,13 @@ async def process_album(client, message, url, username, current, total):
     if is_processed(url): return True
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return False
+    
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
+    # Automatic Topic Support via Reply
     status = await message.reply_text(f"📥 **[{current}/{total}]** Preparing: `{title}`")
+
     if photos:
         p_paths = []
         for i, p_url in enumerate(photos, 1):
@@ -209,25 +194,28 @@ async def process_album(client, message, url, username, current, total):
                 await message.reply_media_group([InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_paths])
                 for pf in p_paths: os.remove(pf)
                 p_paths = []
+
     if videos:
         for i, v_url in enumerate(videos, 1):
             filepath = os.path.join(user_folder, f"{album_id}_v{i}.mp4")
+            headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
             try:
-                headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 if size > 15*1024*1024:
-                    await status.edit_text(f"📥 **[{current}/{total}]** Nitro Downloading..."); download_nitro(v_url, filepath, headers, size)
+                    await edit_status_safe(status, f"📥 **[{current}/{total}]** Nitro Downloading Video..."); download_nitro(v_url, filepath, headers, size)
                 else:
                     await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {i}")
+                
                 dur, w, h, audio = get_video_meta(filepath)
                 if not audio:
                     temp = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     os.remove(filepath); os.rename(temp, filepath)
+                
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=progress_callback, progress_args=(client, status, [time.time()], f"Uploading Video {i}"))
+                await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=progress_callback, progress_args=(client, status, [time.time()], "Uploading Video"))
                 os.remove(filepath); os.remove(thumb)
             except: pass
     mark_processed(url); await status.delete(); return True
@@ -235,16 +223,23 @@ async def process_album(client, message, url, username, current, total):
 # ==========================================
 # COMMAND HANDLERS
 # ==========================================
-@app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
+@app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
-    username = message.command[1].strip()
-    msg = await message.reply(f"🛰 **Initializing Stealth Scanner: {username}...**")
-    all_urls = await scan_all_content(username, msg)
-    if not all_urls: return await msg.edit_text("❌ No items found. Check Terminal for Status Code.")
-    await msg.edit_text(f"✅ Found: `{len(all_urls)}`. Archiving...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{message.chat.id}")]]))
+    username = message.command[1].strip().split('/')[-1]
+    chat_id = message.chat.id
+    cancel_tasks[chat_id] = False 
+    msg = await message.reply(f"🛰 **Scanning profile: {username}...**")
+    
+    # Run scanner in separate thread to avoid blocking
+    loop = asyncio.get_event_loop()
+    all_urls = await loop.run_in_executor(None, get_all_profile_content, username, msg)
+    
+    if not all_urls: return await msg.edit_text("❌ No items found.")
+    await msg.edit_text(f"✅ Found: `{len(all_urls)}`. Archiving...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
+    
     for i, url in enumerate(all_urls, 1):
-        if cancel_tasks.get(message.chat.id): break
+        if cancel_tasks.get(chat_id): break
         await process_album(client, message, url, username, i, len(all_urls))
     await msg.delete(); await message.reply(f"🏆 Done for `{username}`!")
 
@@ -253,7 +248,7 @@ async def handle_stop(client, callback: CallbackQuery):
     cancel_tasks[int(callback.data.split("|")[1])] = True
     await callback.answer("Stopping.")
 
-@app.on_message(filters.command("dl", prefixes=".") & filters.user(SUDO_USERS))
+@app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
     for i, url in enumerate(urls, 1): await process_album(client, message, url, "single", i, len(urls))
@@ -263,7 +258,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.98 Stealth Hunter Online!")
+        print("LOG: V8.99 Master Online!")
         await idle()
 
 if __name__ == "__main__":
