@@ -8,8 +8,8 @@ import re
 import sqlite3
 import gc
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters, idle, errors
-from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram import Client, filters, idle
+from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from pyrogram.errors import MessageNotModified, FloodWait
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -30,7 +30,7 @@ cancel_tasks = {}
 # [KEEP] Your original Nitro-style ThreadPool
 executor = ThreadPoolExecutor(max_workers=2)
 
-# --- 2. DATABASE ENGINE (Fixed Queue System) ---
+# --- 2. DATABASE ENGINE (New Schema) ---
 DB_NAME = "bot_archive.db"
 
 def init_db():
@@ -72,15 +72,15 @@ def mark_done(url):
     cursor = conn.cursor()
     cursor.execute("UPDATE queue SET status = 1 WHERE url = ?", (url,))
     conn.commit()
-    # Auto-Sync to GitHub after each task
+    # GitHub Auto-Sync after each album
     try:
         subprocess.run(["git", "add", DB_NAME], capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Sync DB"], capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Sync Memory"], capture_output=True)
         subprocess.run(["git", "push"], capture_output=True)
     except: pass
     conn.close()
 
-# --- 3. HELPERS (Keep Your Original Code) ---
+# --- 3. HELPERS (Keeping Your Code) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -99,13 +99,13 @@ def get_video_meta(video_path):
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
-        duration = int(float(data.get('format', {}).get('duration', 0)))
+        duration = int(float(data['format']['duration']))
         v = next((s for s in data['streams'] if s['codec_type'] == 'video'), {})
         return duration, int(v.get('width', 1280)), int(v.get('height', 720)), any(s['codec_type'] == 'audio' for s in data['streams'])
     except: return 0, 1280, 720, False
 
 def download_nitro(url, path, headers, size, segs=4):
-    """[KEEP] Your original Nitro logic"""
+    """[KEEP] Your Nitro Downloader"""
     chunk = size // segs
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -113,7 +113,7 @@ def download_nitro(url, path, headers, size, segs=4):
             with open(pp, 'wb') as f:
                 for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
     with ThreadPoolExecutor(max_workers=segs) as ex:
-        for i in range(segs): ex.submit(dl_part, i*chunk, (i+1)*chunk-1 if i < size - 1 else size - 1, i)
+        for i in range(segs): ex.submit(dl_part, i*chunk, (i+1)*chunk-1 if i < size-1 else size - 1, i)
     with open(path, 'wb') as f:
         for i in range(segs):
             pp = f"{path}.p{i}"
@@ -121,22 +121,22 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# WORKER PROCESSOR (Background Archive)
+# SCRAPER & WORKER
 # ==========================================
-def scrape_album_details(url):
+def scrape_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
-        res = session.get(url, headers=headers, timeout=20)
+        res = requests.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = list(dict.fromkeys([x if x.startswith('http') else 'https:' + x for x in [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))] if x]))
+        p_l = [x if x.startswith('http') else 'https:' + x for x in [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))] if x]
         v_l = list(dict.fromkeys(re.findall(r'https?://[^\s"\'\\>]+erome\.com[^\s"\'\\>]+\.mp4', res.text)))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, p_l, v_l
     except: return "Error", [], []
 
 async def background_worker():
-    """ម៉ាស៊ីនទាញយកស្ងាត់ៗក្នុង Background ដើម្បីកុំឱ្យ Bot គាំង"""
+    """Background machine to prevent freezing"""
     while True:
         task = get_next_task()
         if not task:
@@ -145,7 +145,7 @@ async def background_worker():
         
         url, username, chat_id, topic_id = task
         try:
-            title, photos, videos = scrape_album_details(url)
+            title, photos, videos = scrape_details(url)
             user_folder = os.path.join(DOWNLOAD_DIR, username)
             os.makedirs(user_folder, exist_ok=True)
 
@@ -153,17 +153,18 @@ async def background_worker():
                 p_paths = []
                 for i, p_url in enumerate(photos, 1):
                     p = os.path.join(user_folder, f"img_{i}.jpg")
-                    open(p, 'wb').write(session.get(p_url).content); p_paths.append(p)
+                    open(p, 'wb').write(requests.get(p_url).content); p_paths.append(p)
                     if len(p_paths) == 10 or i == len(photos):
                         try: await app.send_media_group(chat_id, [InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_paths], message_thread_id=topic_id)
                         except: pass
-                        [os.remove(pf) for pf in p_paths]; p_paths = []
+                        for pf in p_paths: os.remove(pf)
+                        p_paths = []
 
             if videos:
                 for i, v_url in enumerate(videos, 1):
-                    filepath = os.path.join(DOWNLOAD_DIR, "worker_temp.mp4")
+                    filepath = os.path.join(DOWNLOAD_DIR, f"temp_v{i}.mp4")
                     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
-                    with session.get(v_url, headers=headers, stream=True) as r:
+                    with requests.get(v_url, headers=headers, stream=True) as r:
                         size = int(r.headers.get('content-length', 0))
                         if size > 15*1024*1024: download_nitro(v_url, filepath, headers, size)
                         else:
@@ -183,20 +184,20 @@ async def background_worker():
                     if os.path.exists(thumb): os.remove(thumb)
 
             mark_done(url)
-            print(f"WORKER: Finished {url}")
+            print(f"DONE: {url}")
             await asyncio.sleep(2)
         except Exception as e:
             print(f"WORKER ERROR: {e}")
             await asyncio.sleep(5)
 
 # ==========================================
-# COMMAND HANDLER (Fast Harvesting)
+# COMMANDS
 # ==========================================
 @app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
     username = message.command[1].strip().split("erome.com/")[-1].split('/')[0]
     topic_id = message.message_thread_id
-    status = await message.reply(f"🕵️‍♂️ **Harvesting all items for {username}...**")
+    status = await message.reply(f"🛰 **Harvesting all items for {username}...**")
 
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0'}
     total = 0
@@ -205,7 +206,7 @@ async def user_cmd(client, message):
         while True:
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
-                res = session.get(url, headers=headers, timeout=20)
+                res = requests.get(url, headers=headers, timeout=20)
                 ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
                 if not ids: break
                 for aid in list(dict.fromkeys(ids)):
@@ -213,10 +214,10 @@ async def user_cmd(client, message):
                     total += 1
                 if "Next" not in res.text: break
                 page += 1
-                if total % 50 == 0: await status.edit_text(f"🔍 **Found:** `{total}` items...")
+                if total % 100 == 0: await status.edit_text(f"🔍 **Found:** `{total}` items...")
             except: break
 
-    await status.edit_text(f"✅ **Done!** `{total}` items added to worker.\nArchive is running in background.")
+    await status.edit_text(f"✅ **Done!** `{total}` items added to background worker.\nYour files will arrive shortly.")
 
 @app.on_message(filters.command("dl", prefixes=".") & filters.user(SUDO_USERS))
 async def dl_handler(client, message):
@@ -229,7 +230,7 @@ async def main():
     init_db()
     asyncio.create_task(background_worker())
     async with app:
-        print("LOG: V9.51 Background Worker is Online!")
+        print("LOG: V9.52 Ready & Online!")
         await idle()
 
 if __name__ == "__main__":
