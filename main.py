@@ -92,7 +92,7 @@ def get_video_meta(video_path):
         return duration, width, height, has_audio
     except: return 0, 1280, 720, True
 
-async def download_with_bar(url, path, headers, size, status_msg, action="Downloading"):
+async def download_with_bar(url, path, headers, size, status_msg, action):
     start_time = [time.time()]
     downloaded = 0
     with requests.get(url, headers=headers, stream=True, timeout=60) as r:
@@ -103,7 +103,7 @@ async def download_with_bar(url, path, headers, size, status_msg, action="Downlo
                     downloaded += len(chunk)
                     await update_progress_msg(downloaded, size, status_msg, start_time, action)
 
-def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4):
+def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4, action="Nitro"):
     chunk = size // segs
     downloaded_shared = [0]
     start_time = [time.time()]
@@ -117,7 +117,7 @@ def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4):
                             f.write(chk)
                             downloaded_shared[0] += len(chk)
                             asyncio.run_coroutine_threadsafe(
-                                update_progress_msg(downloaded_shared[0], size, status_msg, start_time, "Nitro Downloading"), loop
+                                update_progress_msg(downloaded_shared[0], size, status_msg, start_time, action), loop
                             )
         except: pass
     with ThreadPoolExecutor(max_workers=segs) as ex:
@@ -151,7 +151,7 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 # ==========================================
-# CORE DELIVERY (SPLIT GROUPS)
+# CORE DELIVERY
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
@@ -167,15 +167,14 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
     if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
     
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Media:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing:** `{title}`", reply_to_message_id=reply_id)
     album_caption = f"🎬 **{title}**\n👤 User: `{username}`\n📦 Content: {len(photos)}🖼 {len(videos)}🎬"
 
-    loop = asyncio.get_event_loop()
-
-    # --- 1. PHOTO DELIVERY ---
+    # --- 1. PHOTOS (Group of 10) ---
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
+            await status.edit_text(f"🖼 **Downloading Photo {i}/{len(photos)}**\nAlbum: `{title}`")
             path = os.path.join(user_folder, f"p_{i}.jpg")
             try:
                 r = session.get(p_url, timeout=30)
@@ -189,58 +188,45 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             try: await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
             except: pass
         
-        # Immediate cleanup
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # --- 2. VIDEO DELIVERY ---
+    # --- 2. VIDEOS (One-by-One) ---
     if videos:
-        video_media = []
+        loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
             filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
             headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
+            action_name = f"🎬 Downloading Video {v_idx}/{len(videos)}"
+            
             try:
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
-                # Download with progress bar
                 if size > 15*1024*1024:
-                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
+                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_name)
                 else:
-                    await download_with_bar(v_url, filepath, headers, size, status)
+                    await download_with_bar(v_url, filepath, headers, size, status, action_name)
+
+                if not os.path.exists(filepath): continue
 
                 dur, w, h, has_audio = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                video_media.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
+                start_time = [time.time()]
+                await client.send_video(
+                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    width=w, height=h, duration=dur, 
+                    caption=f"🎬 **Video {v_idx}/{len(videos)}**\n{album_caption}",
+                    supports_streaming=True, reply_to_message_id=reply_id,
+                    progress=pyrogram_progress, progress_args=(status, start_time, f"📤 Uploading Video {v_idx}/{len(videos)}")
+                )
                 
-                # If we have 10 videos, send them as an album immediately to save RAM/Disk
-                if len(video_media) == 10:
-                    try: 
-                        await client.send_media_group(chat_id, video_media, reply_to_message_id=reply_id)
-                    except:
-                        # Fallback if group fails
-                        for v in video_media: await client.send_video(chat_id, v.media)
-                    # Clean files
-                    for v in video_media:
-                        if os.path.exists(v.media): os.remove(v.media)
-                        if v.thumb and os.path.exists(v.thumb): os.remove(v.thumb)
-                    video_media = []
+                if os.path.exists(filepath): os.remove(filepath)
+                if os.path.exists(thumb): os.remove(thumb)
             except: pass
 
-        # Send remaining videos
-        if video_media:
-            try:
-                await client.send_media_group(chat_id, video_media, reply_to_message_id=reply_id)
-            except:
-                for v in video_media: await client.send_video(chat_id, v.media)
-            # Clean files
-            for v in video_media:
-                if os.path.exists(v.media): os.remove(v.media)
-                if v.thumb and os.path.exists(v.thumb): os.remove(v.thumb)
-
-    # Final Cleanup
     try: os.rmdir(user_folder)
     except: pass
     mark_processed(album_id)
@@ -258,7 +244,7 @@ async def user_cmd(client, message):
 
     username = message.command[1].strip().split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
-    msg = await message.reply(f"🛰 **Scanning {username}...**")
+    msg = await message.reply(f"🛰 **Scanning...**")
     
     all_urls = []
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -280,13 +266,12 @@ async def user_cmd(client, message):
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, len(all_urls))
-    
     await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Split Album Version Ready!")
+        print("LOG: Explicit Media Download labels enabled!")
         await idle()
 
 if __name__ == "__main__":
