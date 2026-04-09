@@ -49,7 +49,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS (Keeping your bars and moon icons) ---
+# --- 2. HELPERS & ANIMATIONS ---
 
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
@@ -151,11 +151,10 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 # ==========================================
-# CORE DELIVERY (ALBUM GROUP DELIVERY)
+# CORE DELIVERY (SPLIT GROUPS)
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
-    # PEER FIX
     try: await client.get_chat(chat_id)
     except: pass
 
@@ -168,64 +167,80 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
     if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
     
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Media Group:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Media:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
     album_caption = f"🎬 **{title}**\n👤 User: `{username}`\n📦 Content: {len(photos)}🖼 {len(videos)}🎬"
 
-    media_group_payload = []
     loop = asyncio.get_event_loop()
 
-    # 1. Download Photos
-    for i, p_url in enumerate(photos, 1):
-        path = os.path.join(user_folder, f"p_{i}.jpg")
-        try:
-            r = session.get(p_url, timeout=30)
-            with open(path, 'wb') as f: f.write(r.content)
-            media_group_payload.append(InputMediaPhoto(path))
-            if i % 5 == 0: await status.edit_text(f"🖼 **Downloading Photos...** {i}/{len(photos)}")
-        except: pass
-
-    # 2. Download Videos
-    for v_idx, v_url in enumerate(videos, 1):
-        filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
-        headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
-        try:
-            with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
-                size = int(r.headers.get('content-length', 0))
-            
-            if size > 15*1024*1024:
-                await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
-            else:
-                await download_with_bar(v_url, filepath, headers, size, status)
-
-            dur, w, h, has_audio = get_video_meta(filepath)
-            thumb = filepath + ".jpg"
-            # Fast Thumbnail and Audio check
-            subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            media_group_payload.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
-        except: pass
-
-    # 3. Delivery
-    for i in range(0, len(media_group_payload), 10):
-        chunk = media_group_payload[i:i+10]
-        if i == 0: chunk[0].caption = album_caption
+    # --- 1. PHOTO DELIVERY ---
+    if photos:
+        photo_media = []
+        for i, p_url in enumerate(photos, 1):
+            path = os.path.join(user_folder, f"p_{i}.jpg")
+            try:
+                r = session.get(p_url, timeout=30)
+                with open(path, 'wb') as f: f.write(r.content)
+                photo_media.append(InputMediaPhoto(path))
+            except: pass
         
-        try:
-            # Try sending as combined album
-            await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-            await status.edit_text(f"📤 **Uploading Media Group...** {i+len(chunk)}/{len(media_group_payload)}")
-        except Exception as e:
-            # Fallback to one-by-one if Telegram rejects the album
-            for item in chunk:
-                try:
-                    if isinstance(item, InputMediaPhoto):
-                        await client.send_photo(chat_id, item.media, caption=album_caption if i==0 else None)
-                    else:
-                        await client.send_video(chat_id, item.media, caption=album_caption if i==0 else None)
-                except: pass
+        for i in range(0, len(photo_media), 10):
+            chunk = photo_media[i:i+10]
+            if i == 0: chunk[0].caption = album_caption
+            try: await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
+            except: pass
+        
+        # Immediate cleanup
+        for f in os.listdir(user_folder):
+            if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # Cleanup
-    for f in os.listdir(user_folder): os.remove(os.path.join(user_folder, f))
+    # --- 2. VIDEO DELIVERY ---
+    if videos:
+        video_media = []
+        for v_idx, v_url in enumerate(videos, 1):
+            filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
+            headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
+            try:
+                with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
+                    size = int(r.headers.get('content-length', 0))
+                
+                # Download with progress bar
+                if size > 15*1024*1024:
+                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
+                else:
+                    await download_with_bar(v_url, filepath, headers, size, status)
+
+                dur, w, h, has_audio = get_video_meta(filepath)
+                thumb = filepath + ".jpg"
+                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                video_media.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
+                
+                # If we have 10 videos, send them as an album immediately to save RAM/Disk
+                if len(video_media) == 10:
+                    try: 
+                        await client.send_media_group(chat_id, video_media, reply_to_message_id=reply_id)
+                    except:
+                        # Fallback if group fails
+                        for v in video_media: await client.send_video(chat_id, v.media)
+                    # Clean files
+                    for v in video_media:
+                        if os.path.exists(v.media): os.remove(v.media)
+                        if v.thumb and os.path.exists(v.thumb): os.remove(v.thumb)
+                    video_media = []
+            except: pass
+
+        # Send remaining videos
+        if video_media:
+            try:
+                await client.send_media_group(chat_id, video_media, reply_to_message_id=reply_id)
+            except:
+                for v in video_media: await client.send_video(chat_id, v.media)
+            # Clean files
+            for v in video_media:
+                if os.path.exists(v.media): os.remove(v.media)
+                if v.thumb and os.path.exists(v.thumb): os.remove(v.thumb)
+
+    # Final Cleanup
     try: os.rmdir(user_folder)
     except: pass
     mark_processed(album_id)
@@ -271,7 +286,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Media Group Combined Version Ready!")
+        print("LOG: Split Album Version Ready!")
         await idle()
 
 if __name__ == "__main__":
