@@ -122,7 +122,7 @@ async def download_with_bar(url, path, headers, size, status_msg, action, topic=
     downloaded = 0
     with requests.get(url, headers=headers, stream=True, timeout=60) as r:
         with open(path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=512*1024):
+            for chunk in r.iter_content(chunk_size=1024*1024):
                 if chunk:
                     f.write(chunk); downloaded += len(chunk)
                     await update_progress_msg(downloaded, size, status_msg, start_time, action, topic)
@@ -135,13 +135,15 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = ['https:' + x.get('data-src') if x.get('data-src', '').startswith('//') else x.get('data-src') or x.get('src') for x in soup.select('div.img img')]
+        p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
+        p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
         v_l = []
+        # Finding videos more aggressively
         for v_tag in soup.find_all(['source', 'video']):
             v_src = v_tag.get('src') or v_tag.get('data-src')
-            if v_src and (".mp4" in v_src or ".gif" in v_src): 
+            if v_src and ".mp4" in v_src: 
                 v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
-        v_l.extend(re.findall(r'https?://[^\s"\'>]+.(?:mp4|gif)', res.text))
+        v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, list(dict.fromkeys(p_l)), v_l
@@ -162,13 +164,13 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
     if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
     
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Scanning Album...**", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
 
     album_caption = (f"🎬 Topic: **{title}**\n"
                      f"👤 User: `{username}`\n"
                      f"📦 Original Quality")
 
-    # --- PART 1: PHOTOS (With Download Bars) ---
+    # --- 1. PHOTOS (Group of 10 with Bar) ---
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -183,22 +185,18 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         
         for i in range(0, len(photo_media), 10):
             chunk = photo_media[i:i+10]
-            # Attach caption only to the first group/photo of the album
             if i == 0: chunk[0].caption = album_caption
             try: await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
             except: pass
-        
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # --- PART 2: VIDEOS & GIF CONVERSION ---
+    # --- 2. VIDEOS (One-by-One with Bar) ---
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
-            is_gif = v_url.lower().endswith(".gif")
             filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
             action_v = f"🎬 Downloading Video {v_idx}/{len(videos)}"
-            if is_gif: action_v = f"🎞 Processing GIF {v_idx}"
             
             try:
                 with requests.get(v_url, stream=True, timeout=15) as r:
@@ -211,31 +209,26 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
                 if not os.path.exists(filepath): continue
                 
-                # Convert if GIF or fix for Streaming
-                target_file = filepath
-                if is_gif:
-                    await status.edit_text(f"⚙️ **Converting GIF to Video...**\n`{title}`")
-                    target_file = filepath + ".mp4"
-                    subprocess.run(['ffmpeg', '-i', filepath, '-movflags', 'faststart', '-pix_fmt', 'yuv420p', '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', target_file, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    os.remove(filepath)
-                else:
-                    # Fix MP4 for streaming
-                    subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', filepath+'.tmp.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(filepath+'.tmp.mp4'): os.remove(filepath); os.rename(filepath+'.tmp.mp4', filepath)
+                # --- UNIVERSAL MOBILE FIX (Fast Version) ---
+                fixed_file = filepath + ".fixed.mp4"
+                # Fixes container and odd-pixel sizes for mobile compatibility
+                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", '-movflags', 'faststart', fixed_file, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(fixed_file):
+                    os.remove(filepath); os.rename(fixed_file, filepath)
 
-                dur, w, h = get_video_meta(target_file)
-                thumb = target_file + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '1', '-i', target_file, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                dur, w, h = get_video_meta(filepath)
+                thumb = filepath + ".jpg"
+                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 start_time_up = [time.time()]
                 await client.send_video(
-                    chat_id=chat_id, video=target_file, thumb=thumb if os.path.exists(thumb) else None,
+                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, supports_streaming=True, 
-                    caption=album_caption if not photos and v_idx == 1 else "", # Caption only if no photos were sent
+                    caption=album_caption if not photos and v_idx == 1 else "",
                     reply_to_message_id=reply_id, progress=pyrogram_progress, 
                     progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
                 )
-                if os.path.exists(target_file): os.remove(target_file)
+                if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
 
@@ -262,17 +255,14 @@ async def user_cmd(client, message):
     query = raw_input.split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
     msg = await message.reply(f"🛰 **Scanning for `{query}`...**")
-    
     all_urls = []
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
     
-    # SCAN AS USER
     for tab in ["", "/reposts"]:
         page = 1
         while True:
             url = f"https://www.erome.com/{query}{tab}?page={page}"
             try:
-                res = session.get(url, headers=headers, timeout=15)
+                res = session.get(url, timeout=15)
                 if res.status_code != 200: break
                 ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
                 if not ids: break
@@ -283,13 +273,12 @@ async def user_cmd(client, message):
                 page += 1; await msg.edit_text(f"🔍 Found {len(all_urls)} items in Profile...")
             except: break
 
-    # SCAN AS SEARCH
     if not all_urls:
         page = 1
         while page <= 3:
             url = f"https://www.erome.com/search?v={query}&page={page}"
             try:
-                res = session.get(url, headers=headers, timeout=15)
+                res = session.get(url, timeout=15)
                 if res.status_code != 200: break
                 ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
                 if not ids: break
@@ -300,7 +289,6 @@ async def user_cmd(client, message):
             except: break
 
     if not all_urls: return await msg.edit_text(f"❌ No content found.")
-    
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, query, i, len(all_urls))
@@ -309,7 +297,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: GIF Conversion & Photo Bar Version Ready!")
+        print("LOG: Ready and Working!")
         await idle()
 
 if __name__ == "__main__":
