@@ -178,7 +178,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
     
     album_caption = (f"🎬 Topic: **{title}**\n"
-                     f"📂 Album ទី: `{current}/{total}`\n"
+                     f"📂 Album: `{current}/{total}`\n"
                      f"📊 Total: `{len(photos)}` Photo | `{len(videos)}` Video\n"
                      f"👤 User: `{username.upper()}`\n"
                      f"📦 Original Quality")
