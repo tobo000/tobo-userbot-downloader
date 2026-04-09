@@ -152,15 +152,20 @@ def scrape_album_details(url):
 # --- 5. CORE DELIVERY ---
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
+    # Peer ID Handshake
     try: await client.get_chat(chat_id)
     except: pass
+
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(album_id): return True
+    
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return False
+    
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
     if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing:** `{title}`", reply_to_message_id=reply_id)
+    
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive**\nTopic: `{title}`", reply_to_message_id=reply_id)
     album_caption = f"🎬 Topic: **{title}**\n👤 User: `{username}`\n📦 Original Quality"
 
     if photos:
@@ -194,13 +199,31 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if size > 15*1024*1024:
                     await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_v, title)
                 else:
-                    await download_with_bar(v_url, filepath, headers, size, status, action_v)
+                    await download_with_bar(v_url, filepath, headers, size, status, action_v, title)
+                
                 if not os.path.exists(filepath): continue
+                
+                # Mobile Playback Fix
+                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', filepath+'.tmp.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(filepath+'.tmp.mp4'): os.remove(filepath); os.rename(filepath+'.tmp.mp4', filepath)
+                
                 dur, w, h = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # UPLOAD STAGE
+                await asyncio.sleep(1) # Let system breathe
+                try: await client.get_chat(chat_id) # Handshake before upload
+                except: pass
+
                 start_time_up = [time.time()]
-                await client.send_video(chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, supports_streaming=True, caption=album_caption if not photos and v_idx == 1 else "", reply_to_message_id=reply_id, progress=pyrogram_progress, progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title))
+                await client.send_video(
+                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    width=w, height=h, duration=dur, supports_streaming=True, 
+                    caption=album_caption if not photos and v_idx == 1 else "",
+                    reply_to_message_id=reply_id, progress=pyrogram_progress, 
+                    progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
+                )
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
@@ -211,13 +234,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
 @app.on_message(filters.command("reset", prefixes="."))
 async def reset_db(client, message):
-    """Command to clear the database so the bot redownloads everything."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM processed")
-    conn.commit()
-    conn.close()
-    await message.reply("🧹 **Memory Cleared!** Bot will now download everything from the beginning again.")
+    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
+    cursor.execute("DELETE FROM processed"); conn.commit(); conn.close()
+    await message.reply("🧹 **Memory Cleared!**")
 
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
@@ -227,7 +246,7 @@ async def user_cmd(client, message):
     except: pass
     raw_input = message.command[1].strip()
     if "/a/" in raw_input:
-        msg = await message.reply("🛰 **Processing Link...**")
+        msg = await message.reply("🛰 **Link Detected...**")
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
         return await msg.delete()
     query = raw_input.split("erome.com/")[-1].split('/')[0]
@@ -273,7 +292,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Referer-Fixed & Reset Command Ready!")
+        print("LOG: Uploader Fix & Stable Version Ready!")
         await idle()
 
 if __name__ == "__main__":
