@@ -64,12 +64,20 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
+# --- ANIMATION PROGRESS CALLBACK ---
 async def progress_callback(current, total, status_msg, start_time, action_text):
     now = time.time()
-    if now - start_time[0] > 5:
+    if now - start_time[0] > 4:
+        # Rotating animation icons
+        anims = ["📂", "📦", "📤", "🚀", "🛰"]
+        anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
         try:
-            await status_msg.edit_text(f"🚀 {action_text}\n\n{bar}\n📦 Size: {get_human_size(current)} / {get_human_size(total)}")
+            await status_msg.edit_text(
+                f"{anim} **{action_text}**\n\n"
+                f"{bar}\n"
+                f"📊 **Size:** {get_human_size(current)} / {get_human_size(total)}"
+            )
             start_time[0] = now
         except: pass
 
@@ -157,7 +165,7 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# CORE DELIVERY (V8.83)
+# CORE DELIVERY
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
@@ -170,7 +178,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
 
-    status = await client.send_message(chat_id, f"📥 **[{current}/{total}]** Preparing: `{title}`", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"⚡ **[{current}/{total}]** Initializing: `{title}`", reply_to_message_id=reply_id)
 
     # Photos
     if photos:
@@ -183,14 +191,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if os.path.exists(path): p_files.append(path)
                 if len(p_files) == 10 or i == len(photos):
                     if p_files:
-                        # Photos are still sent to show progress, comment these 2 lines if you want photos local only too
                         await client.send_media_group(chat_id, [InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_files], reply_to_message_id=reply_id)
                         for pf in p_files: os.remove(pf)
                     p_files = []
             except: pass
 
-
-    # Videos (Improved Size Handling - Downloaded but NOT sent)
+    # Videos
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
@@ -200,7 +206,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
-                await status.edit_text(f"📥 **[{current}/{total}]** Downloading Video {v_idx}/{len(videos)}...\n📦 Size: {get_human_size(size)}")
+                # --- DOWNLOAD ANIMATION ---
+                anims = ["📥", "⬇️", "⏬"]
+                start_time_dl = [time.time()]
+                await status.edit_text(f"{anims[0]} **Downloading Video {v_idx}/{len(videos)}**\n📦 Size: {get_human_size(size)}")
                 
                 if size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, size)
@@ -220,24 +229,19 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # --- START OF "NOT SEND" FIX ---
-                # We comment out the upload part so it just saves to the server folder
+                # --- UPLOAD ANIMATION ---
+                start_time_up = [time.time()]
+                await client.send_video(
+                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}",
+                    supports_streaming=True, reply_to_message_id=reply_id,
+                    progress=progress_callback, progress_args=(status, start_time_up, f"Uploading Video {v_idx}/{len(videos)}")
+                )
                 
-                # start_time = [time.time()]
-                # await client.send_video(
-                #    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                #    width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}",
-                #    supports_streaming=True, reply_to_message_id=reply_id,
-                #    progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
-                # )
-                
-                # We comment out the deletion of the video file so it stays on the server
-                # if os.path.exists(filepath): os.remove(filepath)
-                
+                if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-                # --- END OF "NOT SEND" FIX ---
-                
-            except: pass
+            except Exception as e:
+                print(f"Error Processing Video: {e}")
 
     mark_processed(album_id)
     await status.delete()
@@ -250,6 +254,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
+    
+    # PEER FIX: Force resolution of Chat ID to avoid "Peer id invalid"
+    try:
+        await client.get_chat(message.chat.id)
+    except: pass
+
     input_data = message.command[1].strip()
     username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
     chat_id = message.chat.id
@@ -260,22 +270,26 @@ async def user_cmd(client, message):
     if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
 
     total = len(all_urls)
-    await msg.edit_text(f"✅ Found: `{total}` items. Archiving...", 
+    await msg.edit_text(f"✅ Found: `{total}` items. Starting Archiver...", 
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
 
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, total)
         await asyncio.sleep(1)
-    await msg.delete(); await message.reply(f"🏆 Done for `{username}`! Videos saved to storage.")
+    await msg.delete(); await message.reply(f"🏆 Successfully finished `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task|"))
 async def handle_stop(client, callback: CallbackQuery):
     cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("🛑 Stopping...", show_alert=True)
+    await callback.answer("🛑 Stopping Task...", show_alert=True)
 
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
+    # PEER FIX
+    try: await client.get_chat(message.chat.id)
+    except: pass
+
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
     for i, url in enumerate(urls, 1):
         await process_album(client, message.chat.id, message.id, url, "general", i, len(urls))
@@ -285,7 +299,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Ready (Download Only Mode)!")
+        print("LOG: Animated & Peer-Fixed Version Ready!")
         await idle()
 
 if __name__ == "__main__":
