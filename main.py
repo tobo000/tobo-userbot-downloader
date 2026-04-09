@@ -79,6 +79,7 @@ async def pyrogram_progress(current, total, status_msg, start_time, action_text)
     await update_progress_msg(current, total, status_msg, start_time, action_text)
 
 def get_video_meta(video_path):
+    # Added try/except so it doesn't crash if FFmpeg is missing
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
@@ -90,7 +91,8 @@ def get_video_meta(video_path):
         height = int(v.get('height', 720))
         has_audio = any(s['codec_type'] == 'audio' for s in streams)
         return duration, width, height, has_audio
-    except: return 0, 1280, 720, True
+    except: 
+        return 0, 1280, 720, True
 
 async def download_with_bar(url, path, headers, size, status_msg, action):
     start_time = [time.time()]
@@ -155,7 +157,6 @@ def scrape_album_details(url):
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
-    # Peer Resolution Fix: Double check chat before starting
     try: await client.get_chat(chat_id)
     except: pass
 
@@ -171,7 +172,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing:** `{title}`", reply_to_message_id=reply_id)
     album_caption = f"🎬 **{title}**\n👤 User: `{username}`\n📦 Content: {len(photos)}🖼 {len(videos)}🎬"
 
-    # --- 1. PHOTOS (Groups of 10) ---
+    # --- 1. PHOTOS (Group of 10) ---
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -189,11 +190,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             try: await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
             except: pass
         
-        # Cleanup photos
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # --- 2. VIDEOS (Sent One-By-One) ---
+    # --- 2. VIDEOS (One-by-One) ---
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
@@ -205,7 +205,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
-                # Nitro vs Standard Download with Bar
                 if size > 15*1024*1024:
                     await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_name)
                 else:
@@ -215,15 +214,16 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
                 dur, w, h, has_audio = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # --- PEER FIX BEFORE VIDEO UPLOAD ---
-                try: await client.get_chat(chat_id)
-                except: pass
+                # Wrapped FFmpeg in try block so missing FFmpeg doesn't stop the bot
+                try:
+                    subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                except:
+                    thumb = None
                 
                 start_time = [time.time()]
                 await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    chat_id=chat_id, video=filepath, thumb=thumb if thumb and os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, 
                     caption=f"🎬 **Video {v_idx}/{len(videos)}**\n{album_caption}",
                     supports_streaming=True, reply_to_message_id=reply_id,
@@ -231,9 +231,8 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 )
                 
                 if os.path.exists(filepath): os.remove(filepath)
-                if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e:
-                print(f"Video Error: {e}")
+                if thumb and os.path.exists(thumb): os.remove(thumb)
+            except: pass
 
     try: os.rmdir(user_folder)
     except: pass
@@ -276,18 +275,12 @@ async def user_cmd(client, message):
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, len(all_urls))
-        await asyncio.sleep(1)
     await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
-
-@app.on_callback_query(filters.regex(r"^stop_task|"))
-async def handle_stop(client, callback: CallbackQuery):
-    cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("🛑 Stopping...", show_alert=True)
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Stable Final Peer-Fixed Version Started!")
+        print("LOG: Bot Started!")
         await idle()
 
 if __name__ == "__main__":
