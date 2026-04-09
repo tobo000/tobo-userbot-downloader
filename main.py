@@ -138,13 +138,13 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
-        p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
+        p_l = ['https:' + x.get('data-src') if x.get('data-src', '').startswith('//') else x.get('data-src') or x.get('src') for x in soup.select('div.img img')]
         v_l = []
-        for v_tag in soup.find_all(['source', 'video']):
-            v_src = v_tag.get('src') or v_tag.get('data-src')
-            if v_src: v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
-        v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
+        for v_tag in soup.find_all(['source', 'video', 'a']):
+            v_src = v_tag.get('src') or v_tag.get('data-src') or v_tag.get('href')
+            if v_src and (".mp4" in v_src or ".gif" in v_src): 
+                v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
+        v_l.extend(re.findall(r'https?://[^\s"\'>]+.(?:mp4|gif)', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, list(dict.fromkeys(p_l)), v_l
@@ -189,13 +189,15 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
-            filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
+            is_gif = v_url.lower().endswith(".gif")
+            filepath = os.path.join(user_folder, f"v_{v_idx}" + (".gif" if is_gif else ".mp4"))
             action_v = f"🎬 Downloading Video {v_idx}/{len(videos)}"
+            if is_gif: action_v = f"🎞 Processing GIF {v_idx}"
+            
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
-                
                 if size > 15*1024*1024:
                     await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_v, title)
                 else:
@@ -203,26 +205,35 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 
                 if not os.path.exists(filepath): continue
                 
-                # Mobile Compatibility Optimization
-                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', filepath+'.tmp.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(filepath+'.tmp.mp4'): os.remove(filepath); os.rename(filepath+'.tmp.mp4', filepath)
+                # --- GIF TO VIDEO & UNIVERSAL MOBILE PLAYBACK FIX ---
+                target_video = os.path.join(user_folder, f"final_{v_idx}.mp4")
+                await status.edit_text(f"⚙️ **Optimizing for Phone/PC...**\n`{title}`")
                 
-                dur, w, h = get_video_meta(filepath)
-                thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-                try: await client.get_chat(chat_id)
-                except: pass
+                # Force H.264, yuv420p, even dimensions, and faststart
+                subprocess.run([
+                    'ffmpeg', '-i', filepath, 
+                    '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', 
+                    '-pix_fmt', 'yuv420p', 
+                    '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", 
+                    '-movflags', '+faststart', target_video, '-y'
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                if not os.path.exists(target_video): target_video = filepath # Fallback
+
+                dur, w, h = get_video_meta(target_video)
+                thumb = target_video + ".jpg"
+                subprocess.run(['ffmpeg', '-ss', '1', '-i', target_video, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 start_time_up = [time.time()]
                 await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    chat_id=chat_id, video=target_video, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, supports_streaming=True, 
                     caption=album_caption if not photos and v_idx == 1 else "",
                     reply_to_message_id=reply_id, progress=pyrogram_progress, 
                     progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
                 )
                 if os.path.exists(filepath): os.remove(filepath)
+                if os.path.exists(target_video): os.remove(target_video)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
 
@@ -250,7 +261,7 @@ async def user_cmd(client, message):
         return await msg.delete()
     query = raw_input.split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
-    msg = await message.reply(f"🛰 **Scanning for `{query}`...**")
+    msg = await message.reply(f"🛰 **Scanning...**")
     all_urls = []
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
     for tab in ["", "/reposts"]:
@@ -291,7 +302,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Full Optimized Bot Version Running!")
+        print("LOG: Ready and Working Perfectly!")
         await idle()
 
 if __name__ == "__main__":
