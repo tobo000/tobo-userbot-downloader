@@ -155,7 +155,9 @@ def scrape_album_details(url):
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
-    try: await client.get_chat(chat_id)
+    # CRITICAL: Re-resolve peer before every album to prevent invalid ID error
+    try:
+        await client.get_chat(chat_id)
     except: pass
 
     album_id = url.rstrip('/').split('/')[-1]
@@ -188,6 +190,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             try: await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
             except: pass
         
+        # Cleanup
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
@@ -215,6 +218,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 start_time = [time.time()]
+                # Final check before individual upload
+                try: await client.get_chat(chat_id)
+                except: pass
+                
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, 
@@ -239,7 +246,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     chat_id = message.chat.id
-    try: await client.get_chat(chat_id)
+    
+    # FORCED PEER RESOLUTION FIX
+    try:
+        chat = await client.get_chat(chat_id)
+        chat_id = chat.id # Use the resolved ID
     except: pass
 
     username = message.command[1].strip().split("erome.com/")[-1].split('/')[0]
@@ -252,26 +263,34 @@ async def user_cmd(client, message):
         page = 1
         while True:
             url = f"https://www.erome.com/{username}{tab}?page={page}"
-            res = session.get(url, headers=headers, timeout=20)
-            if res.status_code != 200: break
-            ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
-            if not ids: break
-            for aid in ids:
-                f_url = f"https://www.erome.com/a/{aid}"
-                if f_url not in all_urls: all_urls.append(f_url)
-            if "Next" not in res.text: break
-            page += 1
-            await msg.edit_text(f"🔍 Found {len(all_urls)} items...")
+            try:
+                res = session.get(url, headers=headers, timeout=20)
+                if res.status_code != 200: break
+                ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
+                if not ids: break
+                for aid in ids:
+                    f_url = f"https://www.erome.com/a/{aid}"
+                    if f_url not in all_urls: all_urls.append(f_url)
+                if "Next" not in res.text: break
+                page += 1
+                await msg.edit_text(f"🔍 Found {len(all_urls)} items...")
+            except: break
     
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, len(all_urls))
+        await asyncio.sleep(1)
     await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
+
+@app.on_callback_query(filters.regex(r"^stop_task|"))
+async def handle_stop(client, callback: CallbackQuery):
+    cancel_tasks[int(callback.data.split("|")[1])] = True
+    await callback.answer("🛑 Stopping...", show_alert=True)
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Explicit Media Download labels enabled!")
+        print("LOG: Peer-Fixed & Animation Stable Version Running!")
         await idle()
 
 if __name__ == "__main__":
