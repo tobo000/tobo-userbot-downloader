@@ -192,12 +192,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             is_gif = v_url.lower().endswith(".gif")
             filepath = os.path.join(user_folder, f"v_{v_idx}" + (".gif" if is_gif else ".mp4"))
             action_v = f"🎬 Downloading Video {v_idx}/{len(videos)}"
-            if is_gif: action_v = f"🎞 Processing GIF {v_idx}"
             
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
+                
                 if size > 15*1024*1024:
                     await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_v, title)
                 else:
@@ -205,20 +205,19 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 
                 if not os.path.exists(filepath): continue
                 
-                # --- GIF TO VIDEO & UNIVERSAL MOBILE PLAYBACK FIX ---
+                # --- FAST OPTIMIZATION (Safe Fallback) ---
                 target_video = os.path.join(user_folder, f"final_{v_idx}.mp4")
-                await status.edit_text(f"⚙️ **Optimizing for Phone/PC...**\n`{title}`")
-                
-                # Force H.264, yuv420p, even dimensions, and faststart
-                subprocess.run([
-                    'ffmpeg', '-i', filepath, 
-                    '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', 
-                    '-pix_fmt', 'yuv420p', 
-                    '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", 
-                    '-movflags', '+faststart', target_video, '-y'
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    # Only re-encode if it is a GIF or has odd pixels. Otherwise, just copy metadata (Fast).
+                    if is_gif:
+                        subprocess.run(['ffmpeg', '-i', filepath, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", '-movflags', '+faststart', target_video, '-y'], timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    else:
+                        # Fastest way: Move metadata to front. If it fails, we still have original 'filepath'
+                        subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-map_metadata', '0', '-movflags', '+faststart', target_video, '-y'], timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except: pass
 
-                if not os.path.exists(target_video): target_video = filepath # Fallback
+                # Safety Check: If final video missing, use original downloaded file
+                if not os.path.exists(target_video): target_video = filepath 
 
                 dur, w, h = get_video_meta(target_video)
                 thumb = target_video + ".jpg"
@@ -233,7 +232,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
                 )
                 if os.path.exists(filepath): os.remove(filepath)
-                if os.path.exists(target_video): os.remove(target_video)
+                if os.path.exists(target_video) and target_video != filepath: os.remove(target_video)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
 
@@ -256,12 +255,12 @@ async def user_cmd(client, message):
     except: pass
     raw_input = message.command[1].strip()
     if "/a/" in raw_input:
-        msg = await message.reply("🛰 **Processing Link...**")
+        msg = await message.reply("🛰 **Link Detected...**")
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
         return await msg.delete()
     query = raw_input.split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
-    msg = await message.reply(f"🛰 **Scanning...**")
+    msg = await message.reply(f"🛰 **Scanning for `{query}`...**")
     all_urls = []
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
     for tab in ["", "/reposts"]:
