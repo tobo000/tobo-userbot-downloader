@@ -49,7 +49,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS ---
+# --- 2. HELPERS & ANIMATIONS (Keeping your bars and moon icons) ---
 
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
@@ -129,6 +129,10 @@ def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4):
         for i in range(segs):
             pp = f"{path}.p{i}"; pf = open(pp, 'rb'); f.write(pf.read()); pf.close(); os.remove(pp)
 
+# ==========================================
+# SCRAPER
+# ==========================================
+
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
@@ -147,10 +151,11 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 # ==========================================
-# CORE DELIVERY (SMART MEDIA GROUP)
+# CORE DELIVERY (ALBUM GROUP DELIVERY)
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
+    # PEER FIX
     try: await client.get_chat(chat_id)
     except: pass
 
@@ -163,29 +168,30 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
     if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
     
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Album:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Media Group:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
     album_caption = f"🎬 **{title}**\n👤 User: `{username}`\n📦 Content: {len(photos)}🖼 {len(videos)}🎬"
 
-    media_group_list = []
+    media_group_payload = []
     loop = asyncio.get_event_loop()
 
-    # 1. Download All Photos
+    # 1. Download Photos
     for i, p_url in enumerate(photos, 1):
         path = os.path.join(user_folder, f"p_{i}.jpg")
         try:
             r = session.get(p_url, timeout=30)
             with open(path, 'wb') as f: f.write(r.content)
-            media_group_list.append(InputMediaPhoto(path))
-            if i % 5 == 0: await status.edit_text(f"🖼 **Downloading Photo {i}/{len(photos)}**")
+            media_group_payload.append(InputMediaPhoto(path))
+            if i % 5 == 0: await status.edit_text(f"🖼 **Downloading Photos...** {i}/{len(photos)}")
         except: pass
 
-    # 2. Download All Videos
+    # 2. Download Videos
     for v_idx, v_url in enumerate(videos, 1):
         filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
         headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
         try:
             with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                 size = int(r.headers.get('content-length', 0))
+            
             if size > 15*1024*1024:
                 await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
             else:
@@ -193,27 +199,29 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
             dur, w, h, has_audio = get_video_meta(filepath)
             thumb = filepath + ".jpg"
+            # Fast Thumbnail and Audio check
             subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            media_group_list.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
+            
+            media_group_payload.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
         except: pass
 
-    # 3. Deliver (Try Media Group first, then Fallback to One-by-One)
-    for i in range(0, len(media_group_list), 10):
-        chunk = media_group_list[i:i+10]
+    # 3. Delivery
+    for i in range(0, len(media_group_payload), 10):
+        chunk = media_group_payload[i:i+10]
         if i == 0: chunk[0].caption = album_caption
         
         try:
-            # Try sending as an Album (Media Group)
+            # Try sending as combined album
             await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
+            await status.edit_text(f"📤 **Uploading Media Group...** {i+len(chunk)}/{len(media_group_payload)}")
         except Exception as e:
-            # FALLBACK: If group fails, send each file individually
-            print(f"Media Group failed, switching to fallback: {e}")
+            # Fallback to one-by-one if Telegram rejects the album
             for item in chunk:
                 try:
                     if isinstance(item, InputMediaPhoto):
-                        await client.send_photo(chat_id, item.media, caption=album_caption if i == 0 else None)
+                        await client.send_photo(chat_id, item.media, caption=album_caption if i==0 else None)
                     else:
-                        await client.send_video(chat_id, item.media, caption=album_caption if i == 0 else None)
+                        await client.send_video(chat_id, item.media, caption=album_caption if i==0 else None)
                 except: pass
 
     # Cleanup
@@ -224,15 +232,19 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     await status.delete()
     return True
 
+# --- HANDLERS ---
+
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     chat_id = message.chat.id
     try: await client.get_chat(chat_id)
     except: pass
+
     username = message.command[1].strip().split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
-    msg = await message.reply(f"🛰 **Scanning...**")
+    msg = await message.reply(f"🛰 **Scanning {username}...**")
+    
     all_urls = []
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     for tab in ["", "/reposts"]:
@@ -253,12 +265,13 @@ async def user_cmd(client, message):
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, len(all_urls))
+    
     await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Smart Delivery Version Running!")
+        print("LOG: Media Group Combined Version Ready!")
         await idle()
 
 if __name__ == "__main__":
