@@ -92,12 +92,15 @@ def get_video_meta(video_path):
         return duration, width, height
     except: return 0, 1280, 720
 
-# --- 3. DOWNLOAD ENGINES ---
+# --- 3. DOWNLOAD ENGINES (REFERER FIX) ---
 
 def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4, action="Nitro", topic=""):
     chunk = size // segs
     downloaded_shared = [0]
     start_time = [time.time()]
+    # Added Referer to headers to bypass 403 Forbidden
+    headers['Referer'] = 'https://www.erome.com/'
+    
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
         try:
@@ -120,6 +123,7 @@ def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4, 
 async def download_with_bar(url, path, headers, size, status_msg, action, topic=""):
     start_time = [time.time()]
     downloaded = 0
+    headers['Referer'] = 'https://www.erome.com/'
     with requests.get(url, headers=headers, stream=True, timeout=60) as r:
         with open(path, 'wb') as f:
             for chunk in r.iter_content(chunk_size=1024*1024):
@@ -127,7 +131,7 @@ async def download_with_bar(url, path, headers, size, status_msg, action, topic=
                     f.write(chunk); downloaded += len(chunk)
                     await update_progress_msg(downloaded, size, status_msg, start_time, action, topic)
 
-# --- 4. SCRAPER ---
+# --- 4. SCRAPER (IMPROVED) ---
 
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -135,17 +139,24 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
-        p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
+        
+        # Improved Photo Scraper
+        p_l = []
+        for img in soup.select('div.img img'):
+            src = img.get('data-src') or img.get('src')
+            if src: p_l.append('https:' + src if src.startswith('//') else src)
+        
+        # Improved Video Scraper (Looks for specific erome video domains)
         v_l = []
-        # Finding videos more aggressively
         for v_tag in soup.find_all(['source', 'video']):
             v_src = v_tag.get('src') or v_tag.get('data-src')
-            if v_src and ".mp4" in v_src: 
-                v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
-        v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
+            if v_src: v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
+        
+        # Regex Fallback for hardcoded URLs
+        v_l.extend(re.findall(r'https?://[a-zA-Z0-9\-\.]+\.erome\.com/[a-zA-Z0-9\/\_\-]+\.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
+        
         return title, list(dict.fromkeys(p_l)), v_l
     except: return "Error", [], []
 
@@ -165,24 +176,20 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
     
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
+    album_caption = f"🎬 Topic: **{title}**\n👤 User: `{username}`\n📦 Original Quality"
 
-    album_caption = (f"🎬 Topic: **{title}**\n"
-                     f"👤 User: `{username}`\n"
-                     f"📦 Original Quality")
-
-    # --- 1. PHOTOS (Group of 10 with Bar) ---
+    # PHOTOS
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
             action_p = f"🖼 Downloading Photo {i}/{len(photos)}"
             path = os.path.join(user_folder, f"p_{i}.jpg")
             try:
-                r_h = session.get(p_url, stream=True, timeout=10)
+                r_h = session.get(p_url, headers={'Referer': 'https://www.erome.com/'}, stream=True, timeout=10)
                 p_size = int(r_h.headers.get('content-length', 0))
                 await download_with_bar(p_url, path, {}, p_size, status, action_p, title)
                 photo_media.append(InputMediaPhoto(path))
             except: pass
-        
         for i in range(0, len(photo_media), 10):
             chunk = photo_media[i:i+10]
             if i == 0: chunk[0].caption = album_caption
@@ -191,31 +198,28 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # --- 2. VIDEOS (One-by-One with Bar) ---
+    # VIDEOS (One-by-one)
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
             filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
             action_v = f"🎬 Downloading Video {v_idx}/{len(videos)}"
-            
             try:
-                with requests.get(v_url, stream=True, timeout=15) as r:
+                headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
+                with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
                 if size > 15*1024*1024:
-                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, {}, size, status, loop, 4, action_v, title)
+                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_v, title)
                 else:
-                    await download_with_bar(v_url, filepath, {}, size, status, action_v, title)
+                    await download_with_bar(v_url, filepath, headers, size, status, action_v)
 
                 if not os.path.exists(filepath): continue
                 
-                # --- UNIVERSAL MOBILE FIX (Fast Version) ---
-                fixed_file = filepath + ".fixed.mp4"
-                # Fixes container and odd-pixel sizes for mobile compatibility
-                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", '-movflags', 'faststart', fixed_file, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(fixed_file):
-                    os.remove(filepath); os.rename(fixed_file, filepath)
-
+                # Mobile Compatibility Fix
+                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', filepath+'.tmp.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(filepath+'.tmp.mp4'): os.remove(filepath); os.rename(filepath+'.tmp.mp4', filepath)
+                
                 dur, w, h = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -245,24 +249,22 @@ async def user_cmd(client, message):
     chat_id = message.chat.id
     try: await client.get_chat(chat_id)
     except: pass
-    
     raw_input = message.command[1].strip()
     if "/a/" in raw_input:
-        msg = await message.reply("🛰 **Processing Direct Link...**")
+        msg = await message.reply("🛰 **Processing Link...**")
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
         return await msg.delete()
-
     query = raw_input.split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
     msg = await message.reply(f"🛰 **Scanning for `{query}`...**")
     all_urls = []
-    
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
     for tab in ["", "/reposts"]:
         page = 1
         while True:
             url = f"https://www.erome.com/{query}{tab}?page={page}"
             try:
-                res = session.get(url, timeout=15)
+                res = session.get(url, headers=headers, timeout=15)
                 if res.status_code != 200: break
                 ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
                 if not ids: break
@@ -270,34 +272,32 @@ async def user_cmd(client, message):
                     f_url = f"https://www.erome.com/a/{aid}"
                     if f_url not in all_urls: all_urls.append(f_url)
                 if "Next" not in res.text: break
-                page += 1; await msg.edit_text(f"🔍 Found {len(all_urls)} items in Profile...")
+                page += 1; await msg.edit_text(f"🔍 Found {len(all_urls)} items...")
             except: break
-
     if not all_urls:
         page = 1
         while page <= 3:
             url = f"https://www.erome.com/search?v={query}&page={page}"
             try:
-                res = session.get(url, timeout=15)
+                res = session.get(url, headers=headers, timeout=15)
                 if res.status_code != 200: break
                 ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
                 if not ids: break
                 for aid in ids:
                     f_url = f"https://www.erome.com/a/{aid}"
                     if f_url not in all_urls: all_urls.append(f_url)
-                page += 1; await msg.edit_text(f"🔍 Found {len(all_urls)} items in Search...")
+                page += 1; await msg.edit_text(f"🔍 Found {len(all_urls)} items...")
             except: break
-
-    if not all_urls: return await msg.edit_text(f"❌ No content found.")
+    if not all_urls: return await msg.edit_text(f"❌ No content.")
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, query, i, len(all_urls))
-    await msg.delete(); await message.reply(f"🏆 Completed `{query}`!")
+    await msg.delete(); await message.reply(f"🏆 Completed for `{query}`!")
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Ready and Working!")
+        print("LOG: Referer-Fixed Version Running!")
         await idle()
 
 if __name__ == "__main__":
