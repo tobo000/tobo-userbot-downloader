@@ -28,10 +28,12 @@ session = requests.Session()
 executor = ThreadPoolExecutor(max_workers=8) 
 cancel_tasks = {}
 
-# --- 2. DATABASE (Resume Support) ---
+# --- 2. DATABASE (Upgraded for Resume Support) ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
+    # Table សម្រាប់អាល់ប៊ុមដែលចប់ ១០០%
     conn.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
+    # Table សម្រាប់កត់ត្រារូបភាព/វីដេអូនីមួយៗដែលផ្ញើរួច (ដើម្បី Resume)
     conn.execute("CREATE TABLE IF NOT EXISTS processed_media (media_id TEXT PRIMARY KEY, album_id TEXT)")
     conn.commit(); conn.close()
 
@@ -61,7 +63,7 @@ def mark_processed(album_id):
         conn.commit(); conn.close()
     except: pass
 
-# --- 3. HELPERS & UI (3s Moon Progress Bar) ---
+# --- 3. HELPERS & MOON ANIMATIONS (3s Throttle) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -111,7 +113,7 @@ def get_video_meta(video_path):
         return duration, int(video_stream.get('width', 1280)), int(video_stream.get('height', 720))
     except: return 0, 1280, 720
 
-# --- 4. NITRO DOWNLOAD ENGINE ---
+# --- 4. NITRO DOWNLOAD ENGINE (Original 8-Thread) ---
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs
     downloaded_shared = [0]
@@ -134,9 +136,9 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
         for i in range(segs):
             pp = f"{path}.p{i}"
             if os.path.exists(pp):
-                pf = open(pp, 'rb'); f.write(pf.read()); pf.close(); os.remove(pp)
+                with open(pp, 'rb') as pf: f.write(pf.read()); pf.close(); os.remove(pp)
 
-# --- 5. AGGRESSIVE SCRAPER ---
+# --- 5. CORE DELIVERY (Caption Formatting + Resume + GIF2Video) ---
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
@@ -155,7 +157,6 @@ def scrape_album_details(url):
         return title, list(dict.fromkeys(p_l)), v_l
     except: return "Error", [], []
 
-# --- 6. CORE DELIVERY (Caption Formatting + Resume + GIF2Video) ---
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     try: await client.get_chat(chat_id)
     except: pass
@@ -170,15 +171,14 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     os.makedirs(user_folder, exist_ok=True)
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
 
-    # Captions
+    # Main Album Info
     first_caption = (f"🎬 Topic: **{title}**\n"
                      f"📂 Album: `{current}/{total}`\n"
                      f"📊 Total: `{len(all_photos)}` 🖼 | `{len(all_videos)}` 🎬\n"
                      f"👤 User: `{username.upper()}`\n"
                      f"📦 Quality: **Original Quality**")
 
-    # Track if anything was sent to handle the "First Media" caption rule
-    sent_any = False
+    sent_any_media = False # ប្រើសម្រាប់ឆែកមើលថាត្រូវដាក់ Caption ធំ ឬ Caption តូច
 
     # --- PHOTOS ---
     pending_photos = [p for p in all_photos if not is_media_processed(p)]
@@ -194,9 +194,8 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     size_human = get_human_size(len(r.content))
                     with open(p_path, 'wb') as f: f.write(r.content)
                     
-                    # Caption Logic
-                    is_first = (not sent_any and all_photos.index(p_url) == 0)
-                    if is_first:
+                    # CAPTION LOGIC
+                    if not sent_any_media and all_photos.index(p_url) == 0:
                         cap = first_caption
                     else:
                         cap = f"🖼 Photo: `{all_photos.index(p_url)+1}/{len(all_photos)}` | 📦 Size: `{size_human}`"
@@ -208,13 +207,13 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 try: 
                     await client.send_media_group(chat_id, photo_media, reply_to_message_id=reply_id)
                     for p_url in chunk: mark_media_processed(p_url, album_id)
-                    sent_any = True
+                    sent_any_media = True
                     await asyncio.sleep(2)
                 except: pass
             for f in os.listdir(user_folder):
                 if "p_temp_" in f: os.remove(os.path.join(user_folder, f))
 
-    # --- VIDEOS (GIF to MP4) ---
+    # --- VIDEOS (GIF to MP4 + FastStart) ---
     for v_idx, v_url in enumerate(all_videos, 1):
         if cancel_tasks.get(chat_id) or is_media_processed(v_url): continue
         is_gif = v_url.lower().endswith(".gif")
@@ -236,12 +235,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             thumb = filepath + ".jpg"
             subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            # Caption Logic
-            is_first = (not sent_any and v_idx == 1)
-            if is_first:
+            # CAPTION LOGIC
+            if not sent_any_media and v_idx == 1:
                 v_cap = first_caption
             else:
-                v_cap = f"⏳ Duration: `{time.strftime('%M:%S', time.gmtime(dur))}` | 📦 Size: `{get_human_size(size)}`"
+                duration_str = time.strftime('%M:%S', time.gmtime(dur))
+                v_cap = f"⏳ Duration: `{duration_str}` | 📦 Size: `{get_human_size(size)}`"
 
             try:
                 await client.send_video(
@@ -251,7 +250,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     progress_args=(status, [time.time()], f"📤 Uploading {v_idx}/{len(all_videos)}", title)
                 )
                 mark_media_processed(v_url, album_id)
-                sent_any = True
+                sent_any_media = True
             except: pass
             await asyncio.sleep(2)
             if os.path.exists(filepath): os.remove(filepath)
@@ -261,7 +260,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     mark_processed(album_id)
     await status.delete(); return True
 
-# --- 7. HANDLERS (Formatted Scanning Phase) ---
+# --- 6. HANDLERS (Formatted Scanning Phase) ---
 @app.on_message(filters.command("user", prefixes=".") & filters.user(ADMIN_ID))
 async def user_cmd(client, message):
     chat_id = message.chat.id; raw_input = message.command[1].strip(); cancel_tasks[chat_id] = False
@@ -306,7 +305,6 @@ async def user_cmd(client, message):
 
     if not all_urls: return await msg.edit_text(f"❌ No content for `{query}`.")
     
-    # Scanner Complete UI
     await safe_edit(msg, f"✅ **Scanner Complete!**\n"
                          f"📊 Total Albums: {len(all_urls)} 📂\n"
                          f"🖼 Photos: {total_p} | 🎬 Videos: {total_v}\n"
@@ -330,7 +328,7 @@ async def cancel_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Full Final Formatting Bot Started!")
+        print("LOG: Formatted 100% Original Feature Bot Started!")
         await idle()
 
 if __name__ == "__main__":
