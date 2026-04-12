@@ -47,11 +47,9 @@ def backup_to_github():
             "Authorization": f"token {GH_TOKEN}",
             "Accept": "application/vnd.github.v3+json"
         }
-        # 1. Get current SHA to update file
         res = requests.get(url, headers=headers)
         sha = res.json().get('sha') if res.status_code == 200 else None
         
-        # 2. Encode DB file to Base64
         with open(DB_NAME, "rb") as f:
             content = base64.b64encode(f.read()).decode()
         
@@ -63,7 +61,6 @@ def backup_to_github():
         if sha:
             data["sha"] = sha
             
-        # 3. Push to GitHub
         requests.put(url, headers=headers, data=json.dumps(data))
         print("LOG: [GITHUB] Database synced successfully.")
     except Exception as e:
@@ -92,7 +89,7 @@ def download_from_github():
 # --- 3. DATABASE LOGIC (Resume System) ---
 
 def init_db():
-    download_from_github() # ទាញយកទិន្នន័យពី GitHub ភ្លាមពេលបើក Bot
+    download_from_github() # Startup Sync
     conn = sqlite3.connect(DB_NAME)
     conn.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE IF NOT EXISTS processed_media (media_id TEXT PRIMARY KEY, album_id TEXT)")
@@ -119,8 +116,7 @@ def mark_media_processed(media_url, album_id):
         conn.execute("INSERT OR IGNORE INTO processed_media (media_id, album_id) VALUES (?, ?)", (media_id, album_id))
         conn.commit()
         conn.close()
-        # Update GitHub for every media to ensure no data loss
-        backup_to_github()
+        backup_to_github() # Real-time Sync
     except:
         pass
 
@@ -185,7 +181,7 @@ def get_video_meta(video_path):
     except:
         return 0, 1280, 720
 
-# --- 5. NITRO DOWNLOAD ENGINE (8-Thread Multi-part) ---
+# --- 5. NITRO DOWNLOAD ENGINE ---
 
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs
@@ -224,7 +220,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
                     f.write(pf.read())
                 os.remove(pp)
 
-# --- 6. AGGRESSIVE SCRAPER (Regex + GIFs) ---
+# --- 6. AGGRESSIVE SCRAPER ---
 
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -241,14 +237,13 @@ def scrape_album_details(url):
             if v_src and (".mp4" in v_src or ".gif" in v_src): 
                 v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
         
-        # Aggressive Regex for hidden links
         v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         return title, list(dict.fromkeys(p_l)), v_l
     except:
         return "Error", [], []
 
-# --- 7. CORE DELIVERY (Caption Formatting + Resume + GIF2Video) ---
+# --- 7. CORE DELIVERY (Resume + GIF2Video + FastStart) ---
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     try:
@@ -269,7 +264,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     os.makedirs(user_folder, exist_ok=True)
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive: {title}**", reply_to_message_id=reply_id)
 
-    # Captions
     first_caption = (f"🎬 Topic: **{title}**\n"
                      f"📂 Album: `{current}/{total}`\n"
                      f"📊 Total: `{len(all_photos)}` 🖼 | `{len(all_videos)}` 🎬\n"
@@ -294,7 +288,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     with open(p_path, 'wb') as f:
                         f.write(r.content)
                     
-                    # Caption Logic
                     if not sent_any_media and p_idx == 0:
                         cap = first_caption
                     else:
@@ -338,7 +331,8 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 os.remove(filepath)
                 filepath = final_mp4
             else:
-                subprocess.run(['ffmpeg', '-i', filepath, '-c': 'copy', '-movflags', 'faststart', final_mp4, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # ជួសជុលត្រង់ចំណុចសញ្ញា : ក្នុងបញ្ជី (Fixed the Syntax Error here)
+                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', final_mp4, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if os.path.exists(final_mp4):
                     os.replace(final_mp4, filepath)
 
@@ -346,7 +340,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             thumb = filepath + ".jpg"
             subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            # Caption Logic
             if not sent_any_media and v_idx == 1:
                 v_cap = first_caption
             else:
@@ -401,7 +394,6 @@ async def user_cmd(client, message):
         while page <= 15:
             if cancel_tasks.get(chat_id): break
             try:
-                # Live Animated Scan Status
                 await safe_edit(msg, f"{scan_anims[page%4]} Scanning Page {page}...\n"
                                      f"📦 Albums: {len(all_urls)} 📂\n"
                                      f"🖼 Photos: {total_p} | 🎬 Videos: {total_v}\n"
@@ -431,7 +423,6 @@ async def user_cmd(client, message):
     if not all_urls:
         return await msg.edit_text(f"❌ No content for `{query}`.")
     
-    # Scanner Summary
     await safe_edit(msg, f"✅ **Scanner Complete!**\n"
                          f"📊 Total Albums: {len(all_urls)} 📂\n"
                          f"🖼 Photos: {total_p} | 🎬 Videos: {total_v}\n"
@@ -451,17 +442,17 @@ async def reset_db(client, message):
     conn.execute("DELETE FROM processed_media")
     conn.commit()
     conn.close()
-    backup_to_github() # Sync to GitHub after reset
+    backup_to_github()
     await message.reply("🧹 **Memory Cleared!**")
 
 @app.on_message(filters.command("cancel", prefixes=".") & filters.user(ADMIN_IDS))
 async def cancel_cmd(client, message):
     cancel_tasks[message.chat.id] = True
-    backup_to_github() # Sync on cancel
+    backup_to_github()
     await message.reply("🛑 **Cancelled! Syncing progress to GitHub...**")
 
 async def main():
-    init_db() # Restore DB from GitHub on startup
+    init_db()
     async with app:
         print("LOG: Full Elite Formatting Bot Started!")
         await idle()
