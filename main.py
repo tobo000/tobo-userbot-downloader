@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-ADMIN_ID = 123456789 # <--- ប្តូរដាក់ Telegram ID របស់អ្នក
+ADMIN_ID = 5549600755,7010218617 # <--- ប្តូរដាក់ Telegram ID របស់អ្នក
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=120)
 DOWNLOAD_DIR = "downloads"
