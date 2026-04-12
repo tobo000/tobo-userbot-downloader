@@ -9,7 +9,7 @@ import sqlite3
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, RPCError
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -57,7 +57,6 @@ def get_human_size(num):
 
 async def update_progress_msg(current, total, status_msg, start_time, action_text, topic=""):
     now = time.time()
-    # ប្តូរមក 8 វិនាទី ដើម្បីការពារ FloodWait 420
     if now - start_time[0] > 8: 
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
@@ -93,7 +92,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
     chunk = size // segs
     downloaded_shared = [0]
     start_time = [time.time()]
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -119,7 +118,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
 
 # --- 4. SCRAPER ---
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -131,9 +130,8 @@ def scrape_album_details(url):
         return title, p_l, v_l
     except: return "Error", [], []
 
-# --- 5. CORE DELIVERY ---
+# --- 5. CORE DELIVERY (WITH ERROR CATCHING) ---
 async def process_album(client, chat_id, reply_id, url, username, current, total):
-    # FIX: Resolve Peer ID ដើម្បីបំបាត់ Error Peer id invalid
     try: await client.get_chat(chat_id)
     except: pass
 
@@ -154,7 +152,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                      f"👤 User: `{username.upper()}`\n"
                      f"📦 Original Quality")
 
-    # Photos
+    # --- PHOTOS UPLOAD WITH ERROR CATCHING ---
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -173,12 +171,15 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             if i == 0: chunk[0].caption = album_caption
             try: 
                 await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-                await asyncio.sleep(2) # Cooldown
-            except: pass
+                await asyncio.sleep(2) 
+            except Exception as e:
+                print(f"Photo Upload Error: {e}")
+                await asyncio.sleep(5)
+        
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # Videos
+    # --- VIDEOS UPLOAD WITH ERROR CATCHING ---
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             if cancel_tasks.get(chat_id): break
@@ -190,7 +191,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 label = f"🎬 Downloading Video {v_idx}/{len(videos)}"
                 await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, status, loop, label, title)
 
-                # FASTSTART FIX
                 final_v = filepath + ".stream.mp4"
                 subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', final_v, '-y'], stderr=subprocess.DEVNULL)
                 if os.path.exists(final_v): os.replace(final_v, filepath)
@@ -200,17 +200,22 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
                 
                 start_time_up = [time.time()]
-                await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                    width=w, height=h, duration=dur, supports_streaming=True, 
-                    caption=album_caption if not photos and v_idx == 1 else "",
-                    reply_to_message_id=reply_id, progress=pyrogram_progress, 
-                    progress_args=(status, start_time_up, f"📤 Uploading {v_idx}/{len(videos)}", title)
-                )
-                await asyncio.sleep(2) # Cooldown
+                try:
+                    await client.send_video(
+                        chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                        width=w, height=h, duration=dur, supports_streaming=True, 
+                        caption=album_caption if not photos and v_idx == 1 else "",
+                        reply_to_message_id=reply_id, progress=pyrogram_progress, 
+                        progress_args=(status, start_time_up, f"📤 Uploading {v_idx}/{len(videos)}", title)
+                    )
+                except Exception as e:
+                    print(f"Video Upload Error: {e}")
+                    await client.send_message(chat_id, f"⚠️ Upload failed for video {v_idx} in `{title}`")
+
+                await asyncio.sleep(2) 
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e: print(f"Error: {e}")
+            except Exception as e: print(f"Processing Error: {e}")
 
     mark_processed(album_id)
     await status.delete()
@@ -232,15 +237,43 @@ async def user_cmd(client, message):
         return
 
     query = raw_input.split("erome.com/")[-1].split('/')[0]
-    msg = await message.reply(f"🛰 **Scanning for `{query}`...**")
+    msg = await message.reply(f"🛰 **Initializing Scanner for `{query}`...**")
     
-    res = session.get(f"https://www.erome.com/{query}", headers={'User-Agent': 'Mozilla/5.0'})
-    all_urls = [f"https://www.erome.com/a/{aid}" for aid in re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)]
-    all_urls = list(dict.fromkeys(all_urls))
+    # --- MULTI-PAGE SCANNER WITH ANIMATED COUNT ---
+    all_urls = []
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
+    page = 1
+    scan_anims = ["🔍", "🔎", "📡", "🛰"]
+    
+    while page <= 20: # Safety limit 20 pages
+        if cancel_tasks.get(chat_id): break
+        try:
+            anim = scan_anims[page % len(scan_anims)]
+            await msg.edit_text(f"{anim} **Scanning Page {page}...**\n📦 Found: `{len(all_urls)}` albums")
+            
+            res = session.get(f"https://www.erome.com/{query}?page={page}", headers=headers, timeout=15)
+            ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
+            
+            if not ids: break
+            
+            new_found = 0
+            for aid in ids:
+                f_url = f"https://www.erome.com/a/{aid}"
+                if f_url not in all_urls:
+                    all_urls.append(f_url)
+                    new_found += 1
+            
+            if new_found == 0 or "Next" not in res.text: break
+            page += 1
+            await asyncio.sleep(1) # Breath between page scans
+        except: break
 
-    if not all_urls: return await msg.edit_text(f"❌ No content found.")
+    if not all_urls: return await msg.edit_text(f"❌ No content found for `{query}`.")
     
+    await msg.edit_text(f"✅ **Scanner Complete!**\n📊 Total Albums: `{len(all_urls)}`")
+    await asyncio.sleep(2)
     await msg.delete()
+
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, query, i, len(all_urls))
@@ -248,7 +281,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Fixed Bot Started!")
+        print("LOG: Multi-Page Scanner Fixed & Ready!")
         await idle()
 
 if __name__ == "__main__":
