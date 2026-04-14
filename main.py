@@ -9,6 +9,7 @@ import sqlite3
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
+from pyrogram.errors import FloodWait, RPCError
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -17,13 +18,14 @@ load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
-app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
+# បន្ថែម sleep_threshold ដើម្បីឱ្យវាចាំដោយស្វ័យប្រវត្តិបើជាប់ FloodWait យូរ
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=2000)
 DOWNLOAD_DIR = "downloads"
 DB_NAME = "bot_archive.db"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 
 session = requests.Session()
-executor = ThreadPoolExecutor(max_workers=8) # រក្សាទុក ៨-Thread តាមកូដដើម
+executor = ThreadPoolExecutor(max_workers=8) 
 cancel_tasks = {}
 
 # --- 1. DATABASE ---
@@ -47,7 +49,7 @@ def mark_processed(album_id):
         conn.close()
     except: pass
 
-# --- 2. HELPERS & ANIMATIONS (YOUR ORIGINAL STYLE) ---
+# --- 2. HELPERS & ANIMATIONS ---
 
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
@@ -62,7 +64,6 @@ def get_human_size(num):
 
 async def update_progress_msg(current, total, status_msg, start_time, action_text, topic=""):
     now = time.time()
-    # ប្តូរមក ៣ វិនាទីតាមសំណើ
     if now - start_time[0] > 3: 
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
@@ -70,11 +71,13 @@ async def update_progress_msg(current, total, status_msg, start_time, action_tex
         try:
             await status_msg.edit_text(
                 f"{anim} **{action_text}**\n"
-                f"**Topic:** `{topic[:30]}...`\n\n"
+                f"Topic: `{topic[:30]}...`\n\n"
                 f"{bar}\n"
-                f"📦 **Original Size:** {get_human_size(current)} / {get_human_size(total)}"
+                f"📦 Original Size: {get_human_size(current)} / {get_human_size(total)}"
             )
             start_time[0] = now
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
         except: pass
 
 async def pyrogram_progress(current, total, status_msg, start_time, action_text, topic=""):
@@ -91,7 +94,7 @@ def get_video_meta(video_path):
         return duration, width, height
     except: return 0, 1280, 720
 
-# --- 3. NITRO DOWNLOAD ENGINE (YOUR ORIGINAL MULTI-PART) ---
+# --- 3. NITRO DOWNLOAD ENGINE ---
 
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs
@@ -111,7 +114,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
                             asyncio.run_coroutine_threadsafe(
                                 update_progress_msg(downloaded_shared[0], size, status_msg, start_time, action, topic), loop
                             )
-        except Exception as e: print(f"Part error: {e}")
+        except: pass
 
     with ThreadPoolExecutor(max_workers=segs) as ex:
         futures = [ex.submit(dl_part, i*chunk, ((i+1)*chunk-1 if i < segs-1 else size-1), i) for i in range(segs)]
@@ -124,7 +127,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
                 with open(pp, 'rb') as pf: f.write(pf.read())
                 os.remove(pp)
 
-# --- 4. SCRAPER (YOUR ORIGINAL AGGRESSIVE SCANNER) ---
+# --- 4. SCRAPER ---
 
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -139,7 +142,7 @@ def scrape_album_details(url):
         return title, list(dict.fromkeys(p_l)), v_l
     except: return "Error", [], []
 
-# --- 5. CORE DELIVERY (Caption Formatting Added) ---
+# --- 5. CORE DELIVERY ---
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
@@ -150,14 +153,20 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     
     user_folder = os.path.join(DOWNLOAD_DIR, f"{chat_id}_{album_id}")
     os.makedirs(user_folder, exist_ok=True)
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
+    
+    # ប្រើ try-except FloodWait សម្រាប់ Send Message
+    while True:
+        try:
+            status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive: {title}**", reply_to_message_id=reply_id)
+            break
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
 
-    # Master Caption Format
-    master_cap_base = (f"🎬 Topic: **{title}**\n"
-                       f"📂 Album: `{current}/{total}`\n"
-                       f"📊 Total: `{len(photos)}` 🖼 | `{len(videos)}` 🎬\n"
-                       f"👤 User: `{username.upper()}`\n"
-                       f"📦 Quality: **Original Quality**\n\n")
+    master_caption_base = (f"🎬 Topic: **{title}**\n"
+                           f"📂 Album: `{current}/{total}`\n"
+                           f"📊 Total: `{len(photos)}` 🖼 | `{len(videos)}` 🎬\n"
+                           f"👤 User: `{username.upper()}`\n"
+                           f"📦 Quality: **Original Quality**\n\n")
 
     loop = asyncio.get_event_loop()
     media_sent_count = 0
@@ -176,23 +185,21 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     with open(path, 'wb') as f: f.write(r.content)
                     f_size = get_human_size(os.path.getsize(path))
                     
-                    # Caption for each photo
                     photo_info = f"🖼 Photo: `{current_p_idx + 1}/{len(photos)}` | 📦 Size: `{f_size}`"
-                    
-                    if media_sent_count == 0 and current_p_idx == 0:
-                        cap = master_cap_base + photo_info
-                    else:
-                        cap = photo_info
-                    
+                    cap = master_caption_base + photo_info if media_sent_count == 0 and current_p_idx == 0 else photo_info
                     photo_group.append(InputMediaPhoto(path, caption=cap))
                 except: pass
             
             if photo_group:
-                try: 
-                    await client.send_media_group(chat_id, photo_group, reply_to_message_id=reply_id)
-                    media_sent_count += len(photo_group)
-                    await asyncio.sleep(2)
-                except: pass
+                while True:
+                    try: 
+                        await client.send_media_group(chat_id, photo_group, reply_to_message_id=reply_id)
+                        media_sent_count += len(photo_group)
+                        await asyncio.sleep(2)
+                        break
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 1)
+                    except: break
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
@@ -218,30 +225,32 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
                 
-                # Caption Logic for Video
                 dur_str = time.strftime('%M:%S', time.gmtime(dur))
                 video_info = f"⏳ Duration: `{dur_str}` | 📦 Size: `{real_v_size}`"
-                
-                if media_sent_count == 0 and v_idx == 1:
-                    v_cap = master_cap_base + video_info
-                else:
-                    v_cap = video_info
+                v_cap = master_caption_base + video_info if media_sent_count == 0 and v_idx == 1 else video_info
 
-                start_time_up = [time.time()]
-                await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                    width=w, height=h, duration=dur, supports_streaming=True, 
-                    caption=v_cap, reply_to_message_id=reply_id, progress=pyrogram_progress, 
-                    progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
-                )
-                media_sent_count += 1
+                while True:
+                    try:
+                        start_time_up = [time.time()]
+                        await client.send_video(
+                            chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                            width=w, height=h, duration=dur, supports_streaming=True, 
+                            caption=v_cap, reply_to_message_id=reply_id, progress=pyrogram_progress, 
+                            progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
+                        )
+                        media_sent_count += 1
+                        break
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 1)
+                
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
                 await asyncio.sleep(2)
             except Exception as e: print(f"Video Error: {e}")
 
     mark_processed(album_id)
-    await status.delete()
+    try: await status.delete()
+    except: pass
     return True
 
 # --- HANDLERS ---
@@ -263,25 +272,36 @@ async def user_cmd(client, message):
         return
 
     query = raw_input.split("erome.com/")[-1].split('/')[0]
-    msg = await message.reply(f"🛰 **Initializing Scanner for `{query}`...**")
     
+    # Try sending scanner message with FloodWait protection
+    while True:
+        try:
+            msg = await message.reply(f"🛰 **Initializing Scanner for `{query}`...**")
+            break
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+
     all_urls = []; t_p = 0; t_v = 0
     headers = {'User-Agent': 'Mozilla/5.0'}
     scan_targets = [f"https://www.erome.com/{query}", f"https://www.erome.com/search?v={query}"]
     
     for base_url in scan_targets:
         page = 1
-        while page <= 15: # Scan up to 15 pages
+        while page <= 15: 
             if cancel_tasks.get(chat_id): break
             try:
                 res = session.get(f"{base_url}?page={page}" if "?" in base_url else f"{base_url}?page={page}", headers=headers)
                 
-                # Updated live scanning animation format
-                await msg.edit_text(f"🔍 Scanning Page {page}...\n"
-                                    f"📦 Albums: {len(all_urls)} 📂\n"
-                                    f"🖼 Photos: {t_p} | 🎬 Videos: {t_v}\n"
-                                    f"📊 Total Media: {t_p + t_v}")
-                
+                while True:
+                    try:
+                        await msg.edit_text(f"🔍 Scanning Page {page}...\n"
+                                            f"📦 Albums: {len(all_urls)} 📂\n"
+                                            f"🖼 Photos: {t_p} | 🎬 Videos: {t_v}\n"
+                                            f"📊 Total Media: {t_p + t_v}")
+                        break
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 1)
+
                 ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
                 if not ids: break
                 
@@ -304,13 +324,22 @@ async def user_cmd(client, message):
             except: break
         if all_urls: break
 
-    if not all_urls: return await msg.edit_text(f"❌ No content found.")
-    
-    # Final Scanner Summary (Not deleted)
-    await msg.edit_text(f"✅ **Scanner Complete!**\n"
-                        f"📊 Total Albums: {len(all_urls)} 📂\n"
-                        f"🖼 Photos: {t_p} | 🎬 Videos: {t_v}\n"
-                        f"📊 Total Media: {t_p + t_v}")
+    if not all_urls:
+        while True:
+            try:
+                return await msg.edit_text(f"❌ No content found.")
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 1)
+
+    while True:
+        try:
+            await msg.edit_text(f"✅ **Scanner Complete!**\n"
+                                f"📊 Total Albums: {len(all_urls)} 📂\n"
+                                f"🖼 Photos: {t_p} | 🎬 Videos: {t_v}\n"
+                                f"📊 Total Media: {t_p + t_v}")
+            break
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
     
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
