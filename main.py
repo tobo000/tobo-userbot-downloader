@@ -64,7 +64,7 @@ def get_human_size(num):
 
 async def update_progress_msg(current, total, status_msg, start_time, action_text, topic=""):
     now = time.time()
-    if now - start_time[0] > 3: 
+    if now - start_time[0] > 5: 
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
