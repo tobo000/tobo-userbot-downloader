@@ -24,6 +24,7 @@ GH_TOKEN = os.getenv("GH_TOKEN")
 GH_REPO = os.getenv("GH_REPO") 
 GH_FILE_PATH = "bot_archive.db"
 
+# sleep_threshold=2000 ដើម្បីឱ្យវាចាំដោយស្ងៀមស្ងាត់បំផុតពេលជាប់ Flood យូរ
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=2000)
 DOWNLOAD_DIR = "downloads"
 DB_NAME = "bot_archive.db"
@@ -32,7 +33,7 @@ if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
 session = requests.Session()
-executor = ThreadPoolExecutor(max_workers=8) 
+executor = ThreadPoolExecutor(max_workers=8) # NITRO SPEED
 cancel_tasks = {}
 
 # --- 2. GITHUB SYNC ENGINE ---
@@ -46,7 +47,7 @@ def backup_to_github():
         sha = res.json().get('sha') if res.status_code == 200 else None
         with open(DB_NAME, "rb") as f:
             content = base64.b64encode(f.read()).decode()
-        data = {"message": f"Sync Progress: {time.ctime()}", "content": content, "branch": "main"}
+        data = {"message": f"Sync DB: {time.ctime()}", "content": content, "branch": "main"}
         if sha: data["sha"] = sha
         requests.put(url, headers=headers, data=json.dumps(data))
     except: pass
@@ -60,16 +61,16 @@ def download_from_github():
         if res.status_code == 200:
             content = base64.b64decode(res.json()['content'])
             with open(DB_NAME, "wb") as f: f.write(content)
-            print("LOG: [GITHUB] Database restored.")
     except: pass
 
-# --- 3. DATABASE LOGIC (WITH AUTO-REPAIR) ---
+# --- 3. DATABASE LOGIC (WITH REPAIR) ---
 
 def init_db():
     download_from_github()
     conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-    try: cursor.execute("SELECT album_id FROM processed LIMIT 1")
-    except sqlite3.OperationalError: 
+    try:
+        cursor.execute("SELECT album_id FROM processed LIMIT 1")
+    except sqlite3.OperationalError:
         cursor.execute("DROP TABLE IF EXISTS processed")
         cursor.execute("DROP TABLE IF EXISTS processed_media")
     conn.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
@@ -105,7 +106,7 @@ def mark_processed(album_id):
         conn.commit(); conn.close(); backup_to_github()
     except: pass
 
-# --- 4. HELPERS & MOON ANIMATIONS (3s Throttle) ---
+# --- 4. HELPERS & MOON ANIMATIONS (Throttle 8s for Safety) ---
 
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
@@ -128,7 +129,8 @@ async def safe_edit(msg, text):
 
 async def pyrogram_progress(current, total, status_msg, start_time, action_text, topic=""):
     now = time.time()
-    if now - start_time[0] > 3: 
+    # ប្តូរមក ៨ វិនាទី ដើម្បីការពារការប្លុកយូរៗពី Telegram
+    if now - start_time[0] > 8: 
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
@@ -150,7 +152,7 @@ def get_video_meta(video_path):
         return duration, int(video_stream.get('width', 1280)), int(video_stream.get('height', 720))
     except: return 1, 1280, 720
 
-# --- 5. NITRO DOWNLOAD ENGINE (8-Thread) ---
+# --- 5. NITRO DOWNLOAD ENGINE ---
 
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs; downloaded_shared = [0]; start_time = [time.time()]
@@ -174,7 +176,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
             if os.path.exists(pp):
                 with open(pp, 'rb') as pf: f.write(pf.read()); pf.close(); os.remove(pp)
 
-# --- 6. CORE DELIVERY (Caption Formatting + GIF2Video) ---
+# --- 6. AGGRESSIVE SCRAPER ---
 
 def scrape_album_details(url):
     h = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -272,8 +274,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         except: pass
     mark_processed(album_id); await status.delete(); return True
 
-# --- 7. HANDLERS (Formatted Scanning Phase) ---
-
+# --- 7. HANDLERS ---
 @app.on_message(filters.command("user", prefixes=".") & filters.user(ADMIN_IDS))
 async def user_cmd(client, message):
     chat_id = message.chat.id; raw_input = message.command[1].strip(); cancel_tasks[chat_id] = False
@@ -290,10 +291,10 @@ async def user_cmd(client, message):
 
     for base_url in scan_targets:
         page = 1
-        while True: # Unlimited Pagination
+        while True: 
             if cancel_tasks.get(chat_id): break
             try:
-                await safe_edit(msg, f"{scan_anims[page%4]} Scanning Page {page}...\n📦 Albums: {len(all_urls)} 📂\n🖼 Photos: {total_p} | 🎬 Videos: {total_v}\n📊 Total Media: {total_p + total_v}")
+                await safe_edit(msg, f"{scan_anims[page%4]} Scanning Page {page}...\n📦 Albums Found: {len(all_urls)} 📂\n🖼 Photos: {total_p} | 🎬 Videos: {total_v}\n📊 Total Media: {total_p + total_v}")
                 res = session.get(f"{base_url}?page={page}" if "?" in base_url else f"{base_url}/?page={page}", headers=h, timeout=15)
                 ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
                 if not ids: break
@@ -328,7 +329,7 @@ async def cancel_cmd(client, message):
 async def main():
     init_db(); 
     async with app:
-        print("LOG: Full Master Bot Started!"); await idle()
+        print("LOG: Full Master Silent No-Miss Bot Started!"); await idle()
 
 if __name__ == "__main__":
     app.run(main())
