@@ -142,14 +142,16 @@ async def pyrogram_progress(current, total, status_msg, start_time, action_text,
         except: pass
 
 def get_video_meta(video_path):
+    """Deep metadata extraction to force playable video mode"""
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8'); data = json.loads(res)
         v = next((s for s in data['streams'] if s['codec_type'] == 'video'), {})
         dur = int(float(data.get('format', {}).get('duration', 0)))
-        # ធានាថា Width/Height ជាលេខគូ (Telegram Requirement)
-        return max(1, dur), int(v.get('width', 1280)), int(v.get('height', 720))
-    except: return 1, 1280, 720
+        w = int(v.get('width', 0))
+        h = int(v.get('height', 0))
+        return dur, w, h
+    except: return 0, 0, 0
 
 # --- 5. NITRO DOWNLOAD ENGINE ---
 
@@ -184,8 +186,7 @@ def scrape_album_details(url):
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
         p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
         p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
-        # លុបរូបភាពស្ទួន
-        p_l = list(dict.fromkeys(p_l))
+        p_l = list(dict.fromkeys(p_l)) # No duplicates
         v_l = list(dict.fromkeys(re.findall(r'https?://[^\s"\'>]+.(?:mp4|gif)', res.text)))
         v_l = [v for v in v_l if "erome.com" in v]
         return title, p_l, v_l
@@ -235,7 +236,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     except FloodWait as e: await asyncio.sleep(e.value + 1)
             for f in glob.glob(os.path.join(user_folder, "p_*.jpg")): os.remove(f)
 
-    # --- VIDEOS (Strict Playable Fix) ---
+    # --- VIDEOS ---
     for v_idx, v_url in enumerate(all_videos, 1):
         if cancel_tasks.get(chat_id) or is_media_processed(v_url): continue
         is_gif = v_url.lower().endswith(".gif"); filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
@@ -243,9 +244,16 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             r_h = session.head(v_url); size = int(r_h.headers.get('content-length', 0))
             await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, status, loop, f"📥 Downloading Video {v_idx}", title)
             
-            final_mp4 = os.path.join(user_folder, f"final_{v_idx}.mp4")
-            # បង្ខំឱ្យប្រើ Libx264 និង faststart សម្រាប់ Playability
-            subprocess.run(['ffmpeg', '-i', filepath, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-crf', '23', '-c:a', 'aac', final_mp4, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # --- THE MAGIC FIX: FORCE CONVERSION TO PLAYABLE MP4 ---
+            final_mp4 = os.path.join(user_folder, f"playable_{v_idx}.mp4")
+            subprocess.run([
+                'ffmpeg', '-i', filepath, 
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', # Critical for compatibility
+                '-movflags', '+faststart',                # Critical for immediate play
+                '-c:a', 'aac', '-strict', 'experimental', # Ensure audio track exists
+                '-vf', "scale='trunc(iw/2)*2:trunc(ih/2)*2'", # Ensure dimensions are even
+                final_mp4, '-y'
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             if os.path.exists(final_mp4): 
                 os.remove(filepath); filepath = final_mp4
@@ -258,13 +266,18 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
             while True:
                 try:
-                    # ផ្ញើដោយមាន Width, Height, Duration ច្បាស់លាស់ដើម្បីកុំឱ្យចេញជា Document
+                    # [STRICT FIX] Send with ALL metadata
                     await client.send_video(
-                        chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                        width=int(w), height=int(h), duration=int(dur), 
-                        supports_streaming=True, caption=v_cap,
-                        reply_to_message_id=reply_id, progress=pyrogram_progress,
-                        progress_args=(status, [time.time()], f"📤 Uploading Video {v_idx}", title)
+                        chat_id=chat_id, video=filepath, 
+                        thumb=thumb if os.path.exists(thumb) else None,
+                        width=int(w) if w > 0 else 1280, 
+                        height=int(h) if h > 0 else 720, 
+                        duration=int(dur) if dur > 0 else 1,
+                        supports_streaming=True, 
+                        caption=v_cap,
+                        reply_to_message_id=reply_id, 
+                        progress=pyrogram_progress,
+                        progress_args=(status, [time.time()], f"📤 Uploading {v_idx}", title)
                     )
                     mark_media_processed(v_url, album_id); media_sent_count += 1; await asyncio.sleep(2.5); break
                 except FloodWait as e: await asyncio.sleep(e.value + 1)
@@ -326,7 +339,7 @@ async def dl_handler(client, message):
 async def main():
     init_db(); 
     async with app:
-        print("LOG: V8.97 Final Stable Online!"); await idle()
+        print("LOG: V8.98 Master Ready!"); await idle()
 
 if __name__ == "__main__":
     app.run(main())
