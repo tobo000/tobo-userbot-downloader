@@ -52,7 +52,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH, sleep_threshold=120)
+# Updated Client with flood protection
+app = Client(
+    "tobo_pro_session", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    sleep_threshold=300,
+    max_concurrent_transmissions=1
+)
+
 DOWNLOAD_DIR = "downloads"
 DB_NAME = "bot_archive.db"
 CACHE_DIR = "cache"
@@ -629,10 +637,10 @@ def scrape_album_details(url):
         return "Error", [], []
 
 # ============================================
-# 13. CORE DELIVERY SYSTEM
+# 13. CORE DELIVERY SYSTEM (FIXED - Flood Protection)
 # ============================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
-    """Process and deliver album content"""
+    """Process and deliver album content with flood protection"""
     album_id = url.rstrip('/').split('/')[-1]
     
     checkpoint = checkpoint_manager.load_checkpoint(album_id)
@@ -675,7 +683,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         'current': current, 'total': total
     })
 
-    # Process Photos
+    # Process Photos (with flood protection)
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -702,15 +710,22 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             except Exception as e:
                 logger.error(f"Photo download error: {e}")
         
+        # Send photos with retry
         for i in range(0, len(photo_media), 10):
             chunk = photo_media[i:i+10]
-            try:
-                await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-                await asyncio.sleep(2)
-            except FloodWait as e:
-                await asyncio.sleep(e.x)
-            except Exception as e:
-                logger.error(f"Send photo error: {e}")
+            for attempt in range(3):
+                try:
+                    await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
+                    logger.info(f"Photo chunk {i//10 + 1} sent")
+                    await asyncio.sleep(3)
+                    break
+                except FloodWait as e:
+                    logger.warning(f"FloodWait photos: {e.x}s")
+                    await asyncio.sleep(e.x + 2)
+                except Exception as e:
+                    logger.error(f"Photo send error (attempt {attempt+1}): {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(5)
         
         # Cleanup photos
         for f in os.listdir(user_folder):
@@ -720,9 +735,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 except:
                     pass
 
-    # Process Videos with compression
+    # Process Videos (with flood protection and retry)
     if videos:
         video_media = []
+        video_files = []
+        
         for v_idx, v_url in enumerate(videos, 1):
             if cancel_tasks.get(chat_id):
                 break
@@ -747,7 +764,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     os.remove(filepath)
                     os.rename(final_v, filepath)
 
-                # Auto Compression (Priority 2)
+                # Auto Compression
                 smart_compressor.compress_video(filepath)
 
                 dur, w, h = get_video_meta(filepath)
@@ -775,27 +792,56 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         caption=caption
                     )
                 )
+                video_files.append(filepath)
+                if os.path.exists(thumb):
+                    video_files.append(thumb)
                 
             except Exception as e:
-                logger.error(f"Video Error: {e}")
+                logger.error(f"Video download error: {e}")
         
+        # Send videos with retry logic for flood protection
         for i in range(0, len(video_media), 10):
             chunk = video_media[i:i+10]
-            try:
-                await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-                await asyncio.sleep(2)
-            except FloodWait as e:
-                await asyncio.sleep(e.x)
-            except Exception as e:
-                logger.error(f"Send video album error: {e}")
-        
-        # Cleanup videos
-        for f in os.listdir(user_folder):
-            if f.startswith("v_"):
+            
+            for attempt in range(3):
                 try:
-                    os.remove(os.path.join(user_folder, f))
+                    logger.info(f"Sending video chunk {i//10 + 1}/{ (len(video_media)+9)//10 }, attempt {attempt+1}")
+                    await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
+                    logger.info(f"Video chunk {i//10 + 1} sent successfully")
+                    await asyncio.sleep(5)  # Longer delay for videos
+                    break
+                    
+                except FloodWait as e:
+                    logger.warning(f"FloodWait on videos: {e.x}s - waiting...")
+                    await asyncio.sleep(e.x + 5)
+                    
+                except RPCError as e:
+                    error_str = str(e)
+                    if "FILE_PART_X_MISSING" in error_str:
+                        logger.warning(f"File part missing - waiting 15s before retry...")
+                        await asyncio.sleep(15)
+                    else:
+                        logger.error(f"Video send error (attempt {attempt+1}): {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(10)
+                        else:
+                            logger.error(f"Failed after 3 attempts")
+                
+                except Exception as e:
+                    logger.error(f"Unexpected error (attempt {attempt+1}): {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(10)
+        
+        # Cleanup video files
+        await asyncio.sleep(2)
+        for filepath in video_files:
+            for _ in range(3):
+                try:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    break
                 except:
-                    pass
+                    await asyncio.sleep(1)
 
     # Final cleanup
     checkpoint_manager.clear_checkpoint(album_id)
@@ -887,7 +933,7 @@ async def dashboard_cmd(client, message):
 
 @app.on_message(filters.command("user", prefixes=".") & filters.user(ADMIN_IDS))
 async def user_cmd(client, message):
-    """Download content from Erome user or direct album URL"""
+    """Download ALL content from Erome user - scans every page until exhausted"""
     if len(message.command) < 2:
         await message.reply("Usage: `.user <username or URL>`")
         return
@@ -896,52 +942,188 @@ async def user_cmd(client, message):
     raw_input = message.command[1].strip()
     cancel_tasks[chat_id] = False
     
-    # Direct album URL
+    # Direct album URL - process immediately
     if "/a/" in raw_input:
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
         return
 
-    # User search
+    # Extract username from input
     query = raw_input.split("erome.com/")[-1].split('/')[0]
-    msg = await message.reply(f"**Scanning for `{query}`...**")
+    msg = await message.reply(f"**Starting full scan for `{query}`...**\n_Scanning all pages until exhausted_")
     
     all_urls = []
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
-    scan_targets = [
-        f"https://www.erome.com/{query}",
-        f"https://www.erome.com/search?v={query}"
-    ]
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.erome.com/',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9'
+    }
     
-    for base_url in scan_targets:
-        page = 1
-        while page <= 5:
-            try:
-                res = session.get(
-                    f"{base_url}?page={page}" if "?" in base_url else f"{base_url}?page={page}",
-                    headers=headers, timeout=15
-                )
-                ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
-                if not ids:
-                    break
-                for aid in ids:
-                    f_url = f"https://www.erome.com/a/{aid}"
-                    if f_url not in all_urls:
-                        all_urls.append(f_url)
-                if "Next" not in res.text:
-                    break
-                page += 1
-            except:
-                break
-        if all_urls:
+    total_pages_scanned = 0
+    
+    # ============================================
+    # SCAN 1: User Profile (Posts) - ALL pages
+    # ============================================
+    profile_url = f"https://www.erome.com/{query}"
+    logger.info(f"[SCANNER] Starting profile scan: {profile_url}")
+    
+    page = 1
+    while True:
+        if cancel_tasks.get(chat_id):
+            logger.info("[SCANNER] Cancelled by user")
             break
-
+        
+        try:
+            url = f"{profile_url}?page={page}"
+            logger.info(f"[SCANNER] Profile page {page}: {url}")
+            
+            res = session.get(url, headers=headers, timeout=15)
+            
+            if res.status_code != 200:
+                logger.info(f"[SCANNER] Profile page {page} returned {res.status_code} - stopping")
+                break
+            
+            # Extract album IDs
+            ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
+            
+            if not ids:
+                logger.info(f"[SCANNER] No albums on profile page {page} - stopping")
+                break
+            
+            # Remove duplicates in this page
+            ids = list(dict.fromkeys(ids))
+            
+            new_count = 0
+            for aid in ids:
+                album_url = f"https://www.erome.com/a/{aid}"
+                if album_url not in all_urls:
+                    all_urls.append(album_url)
+                    new_count += 1
+            
+            total_pages_scanned += 1
+            logger.info(f"[SCANNER] Profile page {page}: +{new_count} new | Total: {len(all_urls)}")
+            
+            # Update status message
+            await safe_edit(msg,
+                f"**Scanning `{query}` - Profile**\n"
+                f"Page: `{page}` | Found: `{len(all_urls)}` albums\n"
+                f"_Scanning all pages until exhausted..._"
+            )
+            
+            # Check if there is a next page
+            has_next = False
+            if "Next" in res.text:
+                has_next = True
+            elif f'?page={page+1}' in res.text:
+                has_next = True
+            elif f'/page/{page+1}' in res.text:
+                has_next = True
+            
+            if not has_next:
+                logger.info(f"[SCANNER] No next page after profile page {page} - profile scan complete")
+                break
+            
+            page += 1
+            await asyncio.sleep(0.3)  # Rate limiting
+            
+        except requests.RequestException as e:
+            logger.error(f"[SCANNER] Network error on profile page {page}: {e}")
+            break
+        except Exception as e:
+            logger.error(f"[SCANNER] Error on profile page {page}: {e}")
+            break
+    
+    profile_pages = page
+    
+    # ============================================
+    # SCAN 2: Search/Reposts - ALL pages
+    # ============================================
+    search_url = f"https://www.erome.com/search?v={query}"
+    logger.info(f"[SCANNER] Starting search/reposts scan: {search_url}")
+    
+    search_page = 1
+    while True:
+        if cancel_tasks.get(chat_id):
+            logger.info("[SCANNER] Search scan cancelled by user")
+            break
+        
+        try:
+            url = f"{search_url}&page={search_page}"
+            logger.info(f"[SCANNER] Search page {search_page}: {url}")
+            
+            res = session.get(url, headers=headers, timeout=15)
+            
+            if res.status_code != 200:
+                logger.info(f"[SCANNER] Search page {search_page} returned {res.status_code} - stopping")
+                break
+            
+            ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
+            
+            if not ids:
+                logger.info(f"[SCANNER] No albums on search page {search_page} - stopping")
+                break
+            
+            ids = list(dict.fromkeys(ids))
+            
+            new_count = 0
+            for aid in ids:
+                album_url = f"https://www.erome.com/a/{aid}"
+                if album_url not in all_urls:
+                    all_urls.append(album_url)
+                    new_count += 1
+            
+            total_pages_scanned += 1
+            logger.info(f"[SCANNER] Search page {search_page}: +{new_count} new | Total: {len(all_urls)}")
+            
+            # Update status
+            await safe_edit(msg,
+                f"**Scanning `{query}` - All Pages**\n"
+                f"Profile: `{profile_pages}` pgs | Search: `{search_page}` pgs\n"
+                f"Total albums found: `{len(all_urls)}`\n"
+                f"_Scanning all pages until exhausted..._"
+            )
+            
+            # Check for next page
+            has_next = False
+            if "Next" in res.text:
+                has_next = True
+            elif f'&page={search_page+1}' in res.text:
+                has_next = True
+            
+            if not has_next:
+                logger.info(f"[SCANNER] No next page after search page {search_page} - search scan complete")
+                break
+            
+            search_page += 1
+            await asyncio.sleep(0.3)
+            
+        except requests.RequestException as e:
+            logger.error(f"[SCANNER] Network error on search page {search_page}: {e}")
+            break
+        except Exception as e:
+            logger.error(f"[SCANNER] Error on search page {search_page}: {e}")
+            break
+    
+    search_pages = search_page
+    
+    # ============================================
+    # SCAN COMPLETE - Show results
+    # ============================================
     if not all_urls:
-        return await msg.edit_text(f"No content found for `{query}`")
+        return await msg.edit_text(f"**No content found for `{query}`**")
+    
+    logger.info(f"[SCANNER] Complete! {len(all_urls)} albums from {total_pages_scanned} pages")
     
     await msg.edit_text(
         f"**Scan Complete!**\n"
-        f"Found: `{len(all_urls)}` albums\n"
-        f"Using Smart Queue (max 3 concurrent)\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"User: `{query}`\n"
+        f"Albums found: `{len(all_urls)}`\n"
+        f"Profile pages: `{profile_pages}`\n"
+        f"Search pages: `{search_pages}`\n"
+        f"Total pages: `{total_pages_scanned}`\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"Smart Queue: `3` concurrent\n"
         f"_Starting downloads..._"
     )
     
@@ -964,8 +1146,10 @@ async def user_cmd(client, message):
     stats = smart_queue.get_stats()
     await message.reply(
         f"**All tasks completed!**\n"
+        f"━━━━━━━━━━━━━━━━\n"
         f"Success: `{stats['completed']}`\n"
-        f"Failed: `{stats['failed']}`"
+        f"Failed: `{stats['failed']}`\n"
+        f"Total albums: `{len(all_urls)}`"
     )
 
 @app.on_message(filters.command("reset", prefixes=".") & filters.user(ADMIN_IDS))
@@ -1012,6 +1196,8 @@ async def main():
         logger.info("Priority 1: Live Dashboard - ACTIVE")
         logger.info("Priority 2: Auto Compression Engine - ACTIVE")
         logger.info("Priority 2: Inline Keyboard System - ACTIVE")
+        logger.info("Scanner: ALL PAGES (Posts + Reposts) - ACTIVE")
+        logger.info("Flood Protection: 3 retries + auto-wait - ACTIVE")
         logger.info("Original Download Features - PRESERVED")
         logger.info("=" * 50)
         await idle()
