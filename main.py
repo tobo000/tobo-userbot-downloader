@@ -89,30 +89,25 @@ class SmartQueue:
         self.is_paused = False
     
     async def add_task(self, task_id: str, task_func, priority: int = 0, **kwargs):
-        """Add a new task to the queue"""
         await self.queue.put((priority, task_id, task_func, kwargs))
         logger.info(f"Task added to queue: {task_id}")
     
     async def process_queue(self, progress_callback=None):
-        """Process queue with concurrent execution"""
         while not self.queue.empty():
             if self.is_paused:
                 await asyncio.sleep(1)
                 continue
             
-            # Clean up completed tasks
             completed = [tid for tid, task in self.active_tasks.items() if task.done()]
             for tid in completed:
                 del self.active_tasks[tid]
             
-            # Wait if too many active tasks
             while len(self.active_tasks) >= self.max_concurrent:
                 completed = [tid for tid, task in self.active_tasks.items() if task.done()]
                 for tid in completed:
                     del self.active_tasks[tid]
                 await asyncio.sleep(0.5)
             
-            # Get next task
             priority, task_id, task_func, kwargs = await self.queue.get()
             task = asyncio.create_task(task_func(**kwargs))
             self.active_tasks[task_id] = task
@@ -121,12 +116,10 @@ class SmartQueue:
             if progress_callback:
                 await progress_callback(self.get_stats())
         
-        # Wait for remaining tasks
         if self.active_tasks:
             await asyncio.gather(*self.active_tasks.values(), return_exceptions=True)
     
     def _task_completed(self, task_id: str, task: asyncio.Task):
-        """Callback when a task completes"""
         try:
             result = task.result()
             if result:
@@ -137,7 +130,6 @@ class SmartQueue:
             self.failed_tasks[task_id] = str(e)
     
     def get_stats(self) -> Dict:
-        """Get current queue statistics"""
         return {
             'queue_size': self.queue.qsize(),
             'active_tasks': len(self.active_tasks),
@@ -147,15 +139,12 @@ class SmartQueue:
         }
 
     def pause(self):
-        """Pause the queue"""
         self.is_paused = True
     
     def resume(self):
-        """Resume the queue"""
         self.is_paused = False
     
     def cancel_all(self):
-        """Cancel all tasks"""
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
@@ -170,12 +159,10 @@ smart_queue = SmartQueue()
 # 3. CHECKPOINT MANAGER (Priority 1)
 # ============================================
 class CheckpointManager:
-    """Save and restore download progress for recovery"""
     def __init__(self):
         self.checkpoint_dir = Path(CHECKPOINT_DIR)
     
     def save_checkpoint(self, album_id: str, state: Dict):
-        """Save download state"""
         checkpoint_file = self.checkpoint_dir / f"{album_id}.json"
         state['timestamp'] = time.time()
         try:
@@ -185,7 +172,6 @@ class CheckpointManager:
             logger.error(f"Checkpoint save error: {e}")
     
     def load_checkpoint(self, album_id: str) -> Optional[Dict]:
-        """Load saved download state"""
         checkpoint_file = self.checkpoint_dir / f"{album_id}.json"
         if checkpoint_file.exists():
             try:
@@ -198,7 +184,6 @@ class CheckpointManager:
         return None
     
     def clear_checkpoint(self, album_id: str):
-        """Remove checkpoint after completion"""
         checkpoint_file = self.checkpoint_dir / f"{album_id}.json"
         if checkpoint_file.exists():
             try:
@@ -212,18 +197,15 @@ checkpoint_manager = CheckpointManager()
 # 4. SMART CACHE SYSTEM (Priority 1)
 # ============================================
 class SmartCache:
-    """Intelligent caching system for scraped data"""
     def __init__(self, cache_dir: str = "cache", ttl_hours: int = 1):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
         self.ttl = timedelta(hours=ttl_hours)
     
     def _get_cache_key(self, data: str) -> str:
-        """Generate cache key from URL"""
         return hashlib.md5(data.encode()).hexdigest()
     
     def get_cached_album(self, url: str) -> Optional[Tuple]:
-        """Retrieve album data from cache"""
         cache_file = self.cache_dir / f"album_{self._get_cache_key(url)}.pickle"
         if cache_file.exists():
             try:
@@ -237,7 +219,6 @@ class SmartCache:
         return None
     
     def cache_album(self, url: str, content: Tuple):
-        """Store album data in cache"""
         cache_file = self.cache_dir / f"album_{self._get_cache_key(url)}.pickle"
         try:
             data = {'timestamp': datetime.now(), 'content': content}
@@ -247,7 +228,6 @@ class SmartCache:
             logger.error(f"Cache save error: {e}")
     
     def clean_old_cache(self) -> int:
-        """Remove expired cache files"""
         count = 0
         for cache_file in self.cache_dir.glob("*.pickle"):
             try:
@@ -270,7 +250,6 @@ smart_cache = SmartCache()
 # 5. LIVE DASHBOARD (Priority 1)
 # ============================================
 class LiveDashboard:
-    """Real-time progress dashboard"""
     def __init__(self):
         self.start_time = time.time()
         self.total_downloaded = 0
@@ -278,7 +257,6 @@ class LiveDashboard:
         self.last_update = time.time()
     
     def update_speed(self, bytes_downloaded: int):
-        """Update download speed metrics"""
         now = time.time()
         time_diff = now - self.last_update
         if time_diff > 0:
@@ -287,7 +265,6 @@ class LiveDashboard:
         self.last_update = now
     
     def get_dashboard_text(self, queue_stats: Dict = None) -> str:
-        """Generate dashboard text"""
         elapsed = time.time() - self.start_time
         elapsed_str = time.strftime('%H:%M:%S', time.gmtime(elapsed))
         
@@ -318,7 +295,6 @@ live_dashboard = LiveDashboard()
 # 6. AUTO COMPRESSION ENGINE (Priority 2)
 # ============================================
 class SmartCompressor:
-    """Intelligent video compression engine"""
     COMPRESSION_PROFILES = {
         'light': {'crf': 23, 'preset': 'fast'},
         'medium': {'crf': 28, 'preset': 'medium'},
@@ -326,14 +302,12 @@ class SmartCompressor:
     }
     
     def should_compress(self, filepath: str) -> bool:
-        """Check if file needs compression"""
         if not os.path.exists(filepath):
             return False
         size_mb = os.path.getsize(filepath) / (1024 * 1024)
         return size_mb > 100
     
     def auto_select_profile(self, filepath: str) -> Dict:
-        """Auto-select compression profile based on file size"""
         size_mb = os.path.getsize(filepath) / (1024 * 1024)
         if size_mb > 500:
             return self.COMPRESSION_PROFILES['maximum']
@@ -342,7 +316,6 @@ class SmartCompressor:
         return self.COMPRESSION_PROFILES['light']
     
     def compress_video(self, input_path: str, profile: Dict = None) -> Optional[str]:
-        """Compress video file"""
         if not self.should_compress(input_path):
             return None
         
@@ -389,10 +362,8 @@ smart_compressor = SmartCompressor()
 # 7. INLINE KEYBOARD SYSTEM (Priority 2)
 # ============================================
 class KeyboardManager:
-    """Interactive inline keyboard manager"""
     @staticmethod
     def get_album_keyboard(album_id: str) -> InlineKeyboardMarkup:
-        """Generate keyboard for album actions"""
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("Retry", callback_data=f"retry_{album_id}"),
@@ -402,7 +373,6 @@ class KeyboardManager:
     
     @staticmethod
     def get_control_keyboard() -> InlineKeyboardMarkup:
-        """Generate main control keyboard"""
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("Pause", callback_data="pause_all"),
@@ -421,7 +391,6 @@ keyboard_manager = KeyboardManager()
 # 8. GITHUB SYNC ENGINE
 # ============================================
 def backup_to_github():
-    """Sync database to GitHub"""
     if not GH_TOKEN or not GH_REPO:
         return
     try:
@@ -439,7 +408,6 @@ def backup_to_github():
         logger.error(f"GitHub backup error: {e}")
 
 def download_from_github():
-    """Restore database from GitHub"""
     if not GH_TOKEN or not GH_REPO:
         return
     try:
@@ -458,7 +426,6 @@ def download_from_github():
 # 9. DATABASE LOGIC
 # ============================================
 def init_db():
-    """Initialize database and restore from GitHub"""
     download_from_github()
     conn = sqlite3.connect(DB_NAME)
     conn.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
@@ -467,14 +434,12 @@ def init_db():
     conn.close()
 
 def is_processed(album_id):
-    """Check if album was already processed"""
     conn = sqlite3.connect(DB_NAME)
     res = conn.execute("SELECT 1 FROM processed WHERE album_id = ?", (album_id,)).fetchone()
     conn.close()
     return res is not None
 
 def is_media_processed(media_url):
-    """Check if individual media was already processed"""
     media_id = re.sub(r'\W+', '', media_url)
     conn = sqlite3.connect(DB_NAME)
     res = conn.execute("SELECT 1 FROM processed_media WHERE media_id = ?", (media_id,)).fetchone()
@@ -482,7 +447,6 @@ def is_media_processed(media_url):
     return res is not None
 
 def mark_media_processed(media_url, album_id):
-    """Mark individual media as processed"""
     media_id = re.sub(r'\W+', '', media_url)
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -494,7 +458,6 @@ def mark_media_processed(media_url, album_id):
         pass
 
 def mark_processed(album_id):
-    """Mark album as processed"""
     try:
         conn = sqlite3.connect(DB_NAME)
         conn.execute("INSERT OR IGNORE INTO processed (album_id) VALUES (?)", (album_id,))
@@ -508,14 +471,12 @@ def mark_processed(album_id):
 # 10. HELPERS & MOON ANIMATIONS
 # ============================================
 def create_progress_bar(current, total):
-    """Create visual progress bar"""
     if total <= 0:
         return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
     return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
-    """Convert bytes to human readable format"""
     for unit in ['B', 'KB', 'MB', 'GB']:
         if abs(num) < 1024.0:
             return f"{num:3.1f} {unit}"
@@ -523,14 +484,12 @@ def get_human_size(num):
     return f"{num:.1f} TB"
 
 async def safe_edit(msg, text):
-    """Safely edit message with error handling"""
     try:
         await msg.edit_text(text)
     except:
         pass
 
 async def pyrogram_progress(current, total, status_msg, start_time, action_text, topic=""):
-    """Update progress with moon animations"""
     now = time.time()
     if now - start_time[0] > 3:
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
@@ -548,7 +507,6 @@ async def pyrogram_progress(current, total, status_msg, start_time, action_text,
             pass
 
 def get_video_meta(video_path):
-    """Extract video metadata using ffprobe"""
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
@@ -560,10 +518,9 @@ def get_video_meta(video_path):
         return 1, 1280, 720
 
 # ============================================
-# 11. NITRO DOWNLOAD ENGINE (Original)
+# 11. NITRO DOWNLOAD ENGINE
 # ============================================
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
-    """Multi-threaded nitro download engine"""
     chunk = size // segs
     downloaded_shared = [0]
     start_time = [time.time()]
@@ -608,7 +565,6 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
 # 12. SCRAPER WITH CACHE
 # ============================================
 def scrape_album_details(url):
-    """Scrape album details with cache support"""
     cached = smart_cache.get_cached_album(url)
     if cached:
         return cached
@@ -637,7 +593,7 @@ def scrape_album_details(url):
         return "Error", [], []
 
 # ============================================
-# 13. CORE DELIVERY SYSTEM (FIXED - Flood Protection)
+# 13. CORE DELIVERY SYSTEM (FIXED - Single Video Upload)
 # ============================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     """Process and deliver album content with flood protection"""
@@ -735,15 +691,13 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 except:
                     pass
 
-    # Process Videos (with flood protection and retry)
+    # Process Videos - SEND ONE BY ONE to avoid flood
     if videos:
-        video_media = []
-        video_files = []
-        
         for v_idx, v_url in enumerate(videos, 1):
             if cancel_tasks.get(chat_id):
                 break
             filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
+            thumb = None
             try:
                 r_head = session.head(v_url, headers={'Referer': 'https://www.erome.com/'})
                 size = int(r_head.headers.get('content-length', 0))
@@ -783,65 +737,64 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 else:
                     caption = f"Video `{v_idx}/{len(videos)}` | `{duration_str}` | `{size_h}`"
                 
-                video_media.append(
-                    InputMediaVideo(
-                        media=filepath,
-                        thumb=thumb if os.path.exists(thumb) else None,
-                        width=w, height=h, duration=dur,
-                        supports_streaming=True,
-                        caption=caption
-                    )
-                )
-                video_files.append(filepath)
-                if os.path.exists(thumb):
-                    video_files.append(thumb)
+                # ============================================
+                # SEND VIDEO ONE BY ONE (not media group)
+                # ============================================
+                for attempt in range(3):
+                    try:
+                        logger.info(f"Uploading video {v_idx}/{len(videos)} (attempt {attempt+1})")
+                        
+                        start_time_up = [time.time()]
+                        await client.send_video(
+                            chat_id=chat_id,
+                            video=filepath,
+                            thumb=thumb if os.path.exists(thumb) else None,
+                            width=w, height=h, duration=dur,
+                            supports_streaming=True,
+                            caption=caption,
+                            reply_to_message_id=reply_id,
+                            progress=pyrogram_progress,
+                            progress_args=(status, start_time_up, f"Uploading Video {v_idx}/{len(videos)}", title)
+                        )
+                        
+                        logger.info(f"Video {v_idx} sent successfully")
+                        
+                        # Wait between videos to prevent flood
+                        await asyncio.sleep(10)
+                        break
+                        
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait on video upload: {e.x}s - waiting...")
+                        await asyncio.sleep(e.x + 10)
+                        
+                    except RPCError as e:
+                        error_str = str(e)
+                        if "FILE_PART_X_MISSING" in error_str:
+                            logger.warning(f"File part missing - waiting 20s before retry...")
+                            await asyncio.sleep(20)
+                        else:
+                            logger.error(f"Video upload error (attempt {attempt+1}): {e}")
+                            if attempt < 2:
+                                await asyncio.sleep(15)
+                            else:
+                                logger.error(f"Failed to upload video {v_idx} after 3 attempts")
+                    
+                    except Exception as e:
+                        logger.error(f"Unexpected upload error (attempt {attempt+1}): {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(15)
                 
             except Exception as e:
                 logger.error(f"Video download error: {e}")
-        
-        # Send videos with retry logic for flood protection
-        for i in range(0, len(video_media), 10):
-            chunk = video_media[i:i+10]
-            
-            for attempt in range(3):
-                try:
-                    logger.info(f"Sending video chunk {i//10 + 1}/{ (len(video_media)+9)//10 }, attempt {attempt+1}")
-                    await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-                    logger.info(f"Video chunk {i//10 + 1} sent successfully")
-                    await asyncio.sleep(5)  # Longer delay for videos
-                    break
-                    
-                except FloodWait as e:
-                    logger.warning(f"FloodWait on videos: {e.x}s - waiting...")
-                    await asyncio.sleep(e.x + 5)
-                    
-                except RPCError as e:
-                    error_str = str(e)
-                    if "FILE_PART_X_MISSING" in error_str:
-                        logger.warning(f"File part missing - waiting 15s before retry...")
-                        await asyncio.sleep(15)
-                    else:
-                        logger.error(f"Video send error (attempt {attempt+1}): {e}")
-                        if attempt < 2:
-                            await asyncio.sleep(10)
-                        else:
-                            logger.error(f"Failed after 3 attempts")
-                
-                except Exception as e:
-                    logger.error(f"Unexpected error (attempt {attempt+1}): {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(10)
-        
-        # Cleanup video files
-        await asyncio.sleep(2)
-        for filepath in video_files:
-            for _ in range(3):
+            finally:
+                # Cleanup this video
                 try:
                     if os.path.exists(filepath):
                         os.remove(filepath)
-                    break
+                    if thumb and os.path.exists(thumb):
+                        os.remove(thumb)
                 except:
-                    await asyncio.sleep(1)
+                    pass
 
     # Final cleanup
     checkpoint_manager.clear_checkpoint(album_id)
@@ -857,7 +810,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 # ============================================
 @app.on_callback_query(filters.user(ADMIN_IDS))
 async def handle_callbacks(client: Client, callback_query: CallbackQuery):
-    """Handle all inline button callbacks"""
     data = callback_query.data
     chat_id = callback_query.message.chat.id
     
@@ -904,7 +856,6 @@ async def handle_callbacks(client: Client, callback_query: CallbackQuery):
 # ============================================
 @app.on_message(filters.command("start", prefixes=".") & filters.user(ADMIN_IDS))
 async def start_cmd(client, message):
-    """Start command - show help"""
     await message.reply(
         "**Bot Started!**\n\n"
         "**Commands:**\n"
@@ -918,14 +869,12 @@ async def start_cmd(client, message):
 
 @app.on_message(filters.command("cancel", prefixes=".") & filters.user(ADMIN_IDS))
 async def cancel_cmd(client, message):
-    """Cancel all operations"""
     cancel_tasks[message.chat.id] = True
     smart_queue.cancel_all()
     await message.reply("**Cancellation sent! All operations stopped.**")
 
 @app.on_message(filters.command("dashboard", prefixes=".") & filters.user(ADMIN_IDS))
 async def dashboard_cmd(client, message):
-    """Show live dashboard"""
     stats = smart_queue.get_stats()
     dashboard_text = live_dashboard.get_dashboard_text(stats)
     keyboard = keyboard_manager.get_control_keyboard()
@@ -942,12 +891,12 @@ async def user_cmd(client, message):
     raw_input = message.command[1].strip()
     cancel_tasks[chat_id] = False
     
-    # Direct album URL - process immediately
+    # Direct album URL
     if "/a/" in raw_input:
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
         return
 
-    # Extract username from input
+    # Extract username
     query = raw_input.split("erome.com/")[-1].split('/')[0]
     msg = await message.reply(f"**Starting full scan for `{query}`...**\n_Scanning all pages until exhausted_")
     
@@ -961,36 +910,27 @@ async def user_cmd(client, message):
     
     total_pages_scanned = 0
     
-    # ============================================
     # SCAN 1: User Profile (Posts) - ALL pages
-    # ============================================
     profile_url = f"https://www.erome.com/{query}"
     logger.info(f"[SCANNER] Starting profile scan: {profile_url}")
     
     page = 1
     while True:
         if cancel_tasks.get(chat_id):
-            logger.info("[SCANNER] Cancelled by user")
             break
         
         try:
             url = f"{profile_url}?page={page}"
-            logger.info(f"[SCANNER] Profile page {page}: {url}")
-            
             res = session.get(url, headers=headers, timeout=15)
             
             if res.status_code != 200:
-                logger.info(f"[SCANNER] Profile page {page} returned {res.status_code} - stopping")
                 break
             
-            # Extract album IDs
             ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
             
             if not ids:
-                logger.info(f"[SCANNER] No albums on profile page {page} - stopping")
                 break
             
-            # Remove duplicates in this page
             ids = list(dict.fromkeys(ids))
             
             new_count = 0
@@ -1003,14 +943,12 @@ async def user_cmd(client, message):
             total_pages_scanned += 1
             logger.info(f"[SCANNER] Profile page {page}: +{new_count} new | Total: {len(all_urls)}")
             
-            # Update status message
             await safe_edit(msg,
                 f"**Scanning `{query}` - Profile**\n"
                 f"Page: `{page}` | Found: `{len(all_urls)}` albums\n"
                 f"_Scanning all pages until exhausted..._"
             )
             
-            # Check if there is a next page
             has_next = False
             if "Next" in res.text:
                 has_next = True
@@ -1020,47 +958,36 @@ async def user_cmd(client, message):
                 has_next = True
             
             if not has_next:
-                logger.info(f"[SCANNER] No next page after profile page {page} - profile scan complete")
                 break
             
             page += 1
-            await asyncio.sleep(0.3)  # Rate limiting
+            await asyncio.sleep(0.3)
             
-        except requests.RequestException as e:
-            logger.error(f"[SCANNER] Network error on profile page {page}: {e}")
-            break
         except Exception as e:
             logger.error(f"[SCANNER] Error on profile page {page}: {e}")
             break
     
     profile_pages = page
     
-    # ============================================
     # SCAN 2: Search/Reposts - ALL pages
-    # ============================================
     search_url = f"https://www.erome.com/search?v={query}"
-    logger.info(f"[SCANNER] Starting search/reposts scan: {search_url}")
+    logger.info(f"[SCANNER] Starting search scan: {search_url}")
     
     search_page = 1
     while True:
         if cancel_tasks.get(chat_id):
-            logger.info("[SCANNER] Search scan cancelled by user")
             break
         
         try:
             url = f"{search_url}&page={search_page}"
-            logger.info(f"[SCANNER] Search page {search_page}: {url}")
-            
             res = session.get(url, headers=headers, timeout=15)
             
             if res.status_code != 200:
-                logger.info(f"[SCANNER] Search page {search_page} returned {res.status_code} - stopping")
                 break
             
             ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
             
             if not ids:
-                logger.info(f"[SCANNER] No albums on search page {search_page} - stopping")
                 break
             
             ids = list(dict.fromkeys(ids))
@@ -1075,7 +1002,6 @@ async def user_cmd(client, message):
             total_pages_scanned += 1
             logger.info(f"[SCANNER] Search page {search_page}: +{new_count} new | Total: {len(all_urls)}")
             
-            # Update status
             await safe_edit(msg,
                 f"**Scanning `{query}` - All Pages**\n"
                 f"Profile: `{profile_pages}` pgs | Search: `{search_page}` pgs\n"
@@ -1083,7 +1009,6 @@ async def user_cmd(client, message):
                 f"_Scanning all pages until exhausted..._"
             )
             
-            # Check for next page
             has_next = False
             if "Next" in res.text:
                 has_next = True
@@ -1091,24 +1016,18 @@ async def user_cmd(client, message):
                 has_next = True
             
             if not has_next:
-                logger.info(f"[SCANNER] No next page after search page {search_page} - search scan complete")
                 break
             
             search_page += 1
             await asyncio.sleep(0.3)
             
-        except requests.RequestException as e:
-            logger.error(f"[SCANNER] Network error on search page {search_page}: {e}")
-            break
         except Exception as e:
             logger.error(f"[SCANNER] Error on search page {search_page}: {e}")
             break
     
     search_pages = search_page
     
-    # ============================================
-    # SCAN COMPLETE - Show results
-    # ============================================
+    # SCAN COMPLETE
     if not all_urls:
         return await msg.edit_text(f"**No content found for `{query}`**")
     
@@ -1124,6 +1043,7 @@ async def user_cmd(client, message):
         f"Total pages: `{total_pages_scanned}`\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"Smart Queue: `3` concurrent\n"
+        f"Video upload: One-by-one (anti-flood)\n"
         f"_Starting downloads..._"
     )
     
@@ -1154,7 +1074,6 @@ async def user_cmd(client, message):
 
 @app.on_message(filters.command("reset", prefixes=".") & filters.user(ADMIN_IDS))
 async def reset_db(client, message):
-    """Reset database"""
     if os.path.exists(DB_NAME):
         os.remove(DB_NAME)
     init_db()
@@ -1163,7 +1082,6 @@ async def reset_db(client, message):
 
 @app.on_message(filters.command("stats", prefixes=".") & filters.user(ADMIN_IDS))
 async def stats_cmd(client, message):
-    """Show bot statistics"""
     conn = sqlite3.connect(DB_NAME)
     processed_count = conn.execute("SELECT COUNT(*) FROM processed").fetchone()[0]
     media_count = conn.execute("SELECT COUNT(*) FROM processed_media").fetchone()[0]
@@ -1184,7 +1102,6 @@ async def stats_cmd(client, message):
 # 16. MAIN ENTRY POINT
 # ============================================
 async def main():
-    """Main function to start the bot"""
     init_db()
     async with app:
         logger.info("=" * 50)
@@ -1197,7 +1114,8 @@ async def main():
         logger.info("Priority 2: Auto Compression Engine - ACTIVE")
         logger.info("Priority 2: Inline Keyboard System - ACTIVE")
         logger.info("Scanner: ALL PAGES (Posts + Reposts) - ACTIVE")
-        logger.info("Flood Protection: 3 retries + auto-wait - ACTIVE")
+        logger.info("Video Upload: ONE-BY-ONE (anti-flood) - ACTIVE")
+        logger.info("Flood Protection: 10s delay + 3 retries - ACTIVE")
         logger.info("Original Download Features - PRESERVED")
         logger.info("=" * 50)
         await idle()
