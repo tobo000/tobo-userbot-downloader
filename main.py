@@ -32,7 +32,6 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 ADMIN_IDS = [5549600755, 7010218617]
 
-# GitHub Config
 GH_TOKEN = os.getenv("GH_TOKEN")
 GH_REPO = os.getenv("GH_REPO") 
 GH_FILE_PATH = "bot_archive.db"
@@ -45,7 +44,6 @@ try:
 except ValueError:
     raise ValueError("API_ID must be an integer")
 
-# Setup logging with file handlers
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -57,7 +55,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Set error log level
 for handler in logger.handlers:
     if handler.baseFilename and 'errors' in handler.baseFilename:
         handler.setLevel(logging.ERROR)
@@ -89,13 +86,11 @@ chat_locks = {}
 # ERROR NOTIFICATION SYSTEM (Terminal Only)
 # ============================================
 class ErrorNotifier:
-    """Log errors to terminal and files - no DM"""
     def __init__(self):
         self.error_count = 0
         self.warning_count = 0
     
     def notify(self, error_type: str, message: str, details: str = ""):
-        """Log error to terminal"""
         self.error_count += 1
         border = "=" * 60
         error_msg = (
@@ -112,23 +107,19 @@ class ErrorNotifier:
         logger.error(f"[ERROR #{self.error_count}] {error_type}: {message} | {details}")
     
     def warning(self, warning_type: str, message: str):
-        """Log warning to terminal"""
         self.warning_count += 1
         print(f"⚠️  WARNING [{warning_type}]: {message[:150]}")
         logger.warning(f"[WARNING] {warning_type}: {message}")
     
     def success(self, message: str):
-        """Log success to terminal"""
         print(f"✅ {message}")
         logger.info(f"[SUCCESS] {message}")
     
     def album_report(self, album_id: str, title: str, photos: int, videos: int, 
                      downloaded_p: int, uploaded_p: int, downloaded_v: int, uploaded_v: int,
                      missing_p: int, missing_v: int, success: bool):
-        """Display album report in terminal"""
         border = "=" * 60
         status = "✅ COMPLETE" if (success and missing_p == 0 and missing_v == 0) else "❌ ISSUES FOUND"
-        
         report = (
             f"\n{border}\n"
             f"📊 ALBUM REPORT | {status}\n"
@@ -139,17 +130,12 @@ class ErrorNotifier:
         )
         if missing_p > 0:
             report += f" | ⚠️ {missing_p} MISSING"
-        
         report += f"\nVideos: {downloaded_v}/{videos} downloaded | {uploaded_v}/{videos} uploaded"
         if missing_v > 0:
             report += f" | ⚠️ {missing_v} MISSING"
-        
         report += f"\n{border}\n"
         print(report)
         logger.info(report)
-    
-    def get_stats(self) -> Dict:
-        return {'total_errors': self.error_count, 'total_warnings': self.warning_count}
 
 error_notifier = ErrorNotifier()
 
@@ -157,7 +143,6 @@ error_notifier = ErrorNotifier()
 # MEDIA TRACKING SYSTEM
 # ============================================
 class MediaTracker:
-    """Track every media item to ensure nothing is missed"""
     def __init__(self):
         self.pending_albums = {}
     
@@ -259,10 +244,8 @@ class SmartQueue:
     def _task_completed(self, task_id: str, task: asyncio.Task):
         try:
             result = task.result()
-            if result:
-                self.completed_tasks.add(task_id)
-            else:
-                self.failed_tasks[task_id] = "Task returned False"
+            if result: self.completed_tasks.add(task_id)
+            else: self.failed_tasks[task_id] = "Task returned False"
         except Exception as e:
             self.failed_tasks[task_id] = str(e)
     
@@ -534,7 +517,8 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
                         if chk:
                             f.write(chk); downloaded_shared[0] += len(chk)
                             live_dashboard.update_speed(len(chk))
-                            asyncio.run_coroutine_threadsafe(pyrogram_progress(downloaded_shared[0], size, status_msg, start_time, action, topic), loop)
+                            if status_msg:
+                                asyncio.run_coroutine_threadsafe(pyrogram_progress(downloaded_shared[0], size, status_msg, start_time, action, topic), loop)
         except Exception as e: print(f"Part error: {e}")
     with ThreadPoolExecutor(max_workers=segs) as ex:
         futures = [ex.submit(dl_part, i*chunk, ((i+1)*chunk-1 if i < segs-1 else size-1), i) for i in range(segs)]
@@ -586,61 +570,118 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 # ============================================
-# CORE DELIVERY
+# CORE DELIVERY (Download 3 Concurrent, Upload Sequential)
 # ============================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
+    """Download concurrently (3 albums), upload sequentially per chat"""
     album_id = url.rstrip('/').split('/')[-1]
+    
     if is_processed(album_id):
         print(f"⏭️  Skipping (already processed): {album_id}")
         return True
     
-    title, photos, videos = await asyncio.get_event_loop().run_in_executor(executor, scrape_album_details, url)
-    if not photos and not videos: return False
+    title, photos, videos = await asyncio.get_event_loop().run_in_executor(
+        executor, scrape_album_details, url
+    )
+    if not photos and not videos:
+        return False
     
-    # Register with tracker
     media_tracker.register_album(album_id, title, photos, videos)
-    print(f"\n📊 [{current}/{total}] Processing: {title[:50]}")
+    print(f"\n📊 [{current}/{total}] Downloading: {title[:50]}")
     print(f"   Photos: {len(photos)} | Videos: {len(videos)}")
     
     user_folder = os.path.join(DOWNLOAD_DIR, f"{chat_id}_{album_id}")
     os.makedirs(user_folder, exist_ok=True)
     
+    loop = asyncio.get_event_loop()
+    
+    # ============================================
+    # PHASE 1: DOWNLOAD (3 albums concurrent - NO LOCK)
+    # ============================================
+    downloaded_photos = []
+    downloaded_videos = []
+    
+    # Download Photos
+    if photos:
+        for i, p_url in enumerate(photos, 1):
+            if cancel_tasks.get(chat_id): break
+            path = os.path.join(user_folder, f"p_{i}.jpg")
+            try:
+                def dl_p():
+                    r = session.get(p_url, headers={'Referer': 'https://www.erome.com/'}, timeout=15)
+                    with open(path, 'wb') as f: f.write(r.content)
+                await loop.run_in_executor(executor, dl_p)
+                media_tracker.mark_downloaded(album_id, 'photos', p_url)
+                live_dashboard.update_speed(os.path.getsize(path))
+                size_h = get_human_size(os.path.getsize(path))
+                caption = f"Photo `{i}/{len(photos)}` | `{size_h}`"
+                downloaded_photos.append((path, caption, p_url))
+            except Exception as e:
+                error_notifier.notify("Photo Download", str(e), album_id)
+                log_error_to_db(album_id, "photo_download", str(e))
+    
+    # Download Videos/GIFs
+    if videos:
+        for v_idx, v_url in enumerate(videos, 1):
+            if cancel_tasks.get(chat_id): break
+            is_gif = is_gif_url(v_url)
+            filepath = os.path.join(user_folder, f"v_{v_idx}.{'gif' if is_gif else 'mp4'}")
+            thumb = None
+            try:
+                if is_gif:
+                    success = await loop.run_in_executor(executor, download_simple_file, v_url, filepath)
+                    if not success: continue
+                    converted = smart_compressor.convert_gif_to_mp4(filepath)
+                    if converted: filepath = converted; is_gif = False
+                    else: continue
+                else:
+                    r_head = session.head(v_url, headers={'Referer': 'https://www.erome.com/'})
+                    size = int(r_head.headers.get('content-length', 0))
+                    if size == 0: continue
+                    await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, None, loop, f"Downloading Video {v_idx}", title)
+                    final_v = filepath + ".stream.mp4"
+                    subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', final_v, '-y'], stderr=subprocess.DEVNULL)
+                    if os.path.exists(final_v): os.remove(filepath); os.rename(final_v, filepath)
+                
+                media_tracker.mark_downloaded(album_id, 'videos', v_url)
+                smart_compressor.compress_video(filepath)
+                dur, w, h = get_video_meta(filepath)
+                size_h = get_human_size(os.path.getsize(filepath))
+                thumb = filepath + ".jpg"
+                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
+                duration_str = time.strftime('%M:%S', time.gmtime(dur))
+                media_type = "GIF" if is_gif else "Video"
+                caption = f"{media_type} `{v_idx}/{len(videos)}` | `{duration_str}` | `{size_h}`"
+                downloaded_videos.append((filepath, thumb, w, h, dur, caption, is_gif, v_url))
+            except Exception as e:
+                error_notifier.notify("Video Download", str(e), album_id)
+                log_error_to_db(album_id, "video_download", str(e))
+    
+    print(f"   ✅ Download complete for {album_id} ({len(downloaded_photos)}p, {len(downloaded_videos)}v)")
+    
+    # ============================================
+    # PHASE 2: UPLOAD (Sequential per chat - WITH LOCK)
+    # ============================================
     chat_lock = get_chat_lock(chat_id)
-    album_success = True
-    downloaded_p, uploaded_p = 0, 0
-    downloaded_v, uploaded_v = 0, 0
+    uploaded_p, uploaded_v = 0, 0
     
     async with chat_lock:
-        status = await client.send_message(chat_id, f"[{current}/{total}] Preparing Archive: {title}", reply_to_message_id=reply_id)
+        print(f"   🔒 Upload lock acquired for {album_id}")
         
-        gif_count = sum(1 for v in videos if '.gif' in v.lower())
+        status = await client.send_message(chat_id, f"[{current}/{total}] Uploading: {title}", reply_to_message_id=reply_id)
+        
+        gif_count = sum(1 for v in downloaded_videos if v[6])
         gif_info = f" | {gif_count} GIFs" if gif_count > 0 else ""
-        master_caption = f"**{title}**\n━━━━━━━━━━━━━━━━\nAlbum: `{current}/{total}`\nContent: `{len(photos)}` Photos | `{len(videos)}` Videos{gif_info}\nUser: `{username.upper()}`\nQuality: Original\n━━━━━━━━━━━━━━━━"
-        
-        loop = asyncio.get_event_loop()
+        master_caption = f"**{title}**\n━━━━━━━━━━━━━━━━\nAlbum: `{current}/{total}`\nContent: `{len(downloaded_photos)}` Photos | `{len(downloaded_videos)}` Videos{gif_info}\nUser: `{username.upper()}`\nQuality: Original\n━━━━━━━━━━━━━━━━"
         master_caption_sent = False
-
-        # Photos
-        if photos:
+        
+        # Upload Photos
+        if downloaded_photos:
             photo_media = []
-            for i, p_url in enumerate(photos, 1):
-                if cancel_tasks.get(chat_id): break
-                path = os.path.join(user_folder, f"p_{i}.jpg")
-                try:
-                    def dl_p():
-                        r = session.get(p_url, headers={'Referer': 'https://www.erome.com/'}, timeout=15)
-                        with open(path, 'wb') as f: f.write(r.content)
-                    await loop.run_in_executor(executor, dl_p)
-                    media_tracker.mark_downloaded(album_id, 'photos', p_url)
-                    downloaded_p += 1
-                    live_dashboard.update_speed(os.path.getsize(path))
-                    size_h = get_human_size(os.path.getsize(path))
-                    caption = master_caption + f"\n\nPhoto `{i}/{len(photos)}` | `{size_h}`" if not master_caption_sent and i == 1 else f"Photo `{i}/{len(photos)}` | `{size_h}`"
-                    if not master_caption_sent and i == 1: master_caption_sent = True
-                    photo_media.append(InputMediaPhoto(path, caption=caption))
-                except Exception as e:
-                    error_notifier.notify("Photo Download", str(e), album_id)
-                    log_error_to_db(album_id, "photo_download", str(e))
+            for idx, (path, caption, p_url) in enumerate(downloaded_photos, 1):
+                full_caption = master_caption + f"\n\n{caption}" if not master_caption_sent else caption
+                if idx == 1: master_caption_sent = True
+                photo_media.append(InputMediaPhoto(path, caption=full_caption))
             
             for i in range(0, len(photo_media), 10):
                 chunk = photo_media[i:i+10]
@@ -651,108 +692,72 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         break
                     except FloodWait as e:
                         wait_time = e.value if hasattr(e, 'value') else 15
-                        print(f"⏳ FloodWait photos: {wait_time}s")
+                        print(f"   ⏳ FloodWait photos: {wait_time}s")
                         await asyncio.sleep(wait_time + 5)
                     except Exception as e:
                         if attempt < 2: await asyncio.sleep(5)
             
-            for p_url in photos[:downloaded_p]:
-                if not cancel_tasks.get(chat_id):
-                    media_tracker.mark_uploaded(album_id, 'photos', p_url)
-                    uploaded_p += 1
-            
-            for f in os.listdir(user_folder):
-                if f.startswith("p_"):
-                    try: os.remove(os.path.join(user_folder, f))
-                    except: pass
-
-        # Videos
-        if videos:
-            for v_idx, v_url in enumerate(videos, 1):
-                if cancel_tasks.get(chat_id): break
-                is_gif = is_gif_url(v_url)
-                filepath = os.path.join(user_folder, f"v_{v_idx}.{'gif' if is_gif else 'mp4'}")
-                thumb = None
+            for path, caption, p_url in downloaded_photos:
+                media_tracker.mark_uploaded(album_id, 'photos', p_url)
+                uploaded_p += 1
+                try:
+                    if os.path.exists(path): os.remove(path)
+                except: pass
+        
+        # Upload Videos
+        if downloaded_videos:
+            for idx, (filepath, thumb, w, h, dur, caption, is_gif, v_url) in enumerate(downloaded_videos, 1):
+                media_type = "GIF" if is_gif else "Video"
+                full_caption = master_caption + f"\n\n{caption}" if not master_caption_sent else caption
+                if idx == 1: master_caption_sent = True
+                
                 upload_success = False
+                for attempt in range(3):
+                    try:
+                        start_time_up = [time.time()]
+                        await client.send_video(chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, supports_streaming=True, caption=full_caption, reply_to_message_id=reply_id, progress=pyrogram_progress, progress_args=(status, start_time_up, f"Uploading {media_type} {idx}/{len(downloaded_videos)}", title))
+                        upload_success = True
+                        media_tracker.mark_uploaded(album_id, 'videos', v_url)
+                        uploaded_v += 1
+                        await asyncio.sleep(15)
+                        break
+                    except FloodWait as e:
+                        wait_time = e.value if hasattr(e, 'value') else 15
+                        print(f"   ⏳ FloodWait: {wait_time}s")
+                        await asyncio.sleep(wait_time + 15)
+                    except RPCError as e:
+                        if "FILE_PART_X_MISSING" in str(e): await asyncio.sleep(25)
+                        elif attempt < 2: await asyncio.sleep(15)
+                    except Exception as e:
+                        if attempt < 2: await asyncio.sleep(15)
+                
+                if not upload_success:
+                    error_notifier.notify("Video Upload", f"Failed: {idx}", album_id)
+                    log_error_to_db(album_id, "video_upload", f"Failed video {idx}")
                 
                 try:
-                    if is_gif:
-                        if not await loop.run_in_executor(executor, download_simple_file, v_url, filepath): continue
-                        converted = smart_compressor.convert_gif_to_mp4(filepath)
-                        if converted: filepath = converted
-                        else: continue
-                    else:
-                        r_head = session.head(v_url, headers={'Referer': 'https://www.erome.com/'})
-                        size = int(r_head.headers.get('content-length', 0))
-                        if size == 0: continue
-                        await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, status, loop, f"Downloading Video {v_idx}", title)
-                        final_v = filepath + ".stream.mp4"
-                        subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', final_v, '-y'], stderr=subprocess.DEVNULL)
-                        if os.path.exists(final_v): os.remove(filepath); os.rename(final_v, filepath)
-                    
-                    media_tracker.mark_downloaded(album_id, 'videos', v_url)
-                    downloaded_v += 1
-                    smart_compressor.compress_video(filepath)
-                    dur, w, h = get_video_meta(filepath)
-                    size_h = get_human_size(os.path.getsize(filepath))
-                    thumb = filepath + ".jpg"
-                    subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
-                    
-                    duration_str = time.strftime('%M:%S', time.gmtime(dur))
-                    media_type = "GIF" if is_gif else "Video"
-                    caption = master_caption + f"\n\n{media_type} `{v_idx}/{len(videos)}` | `{duration_str}` | `{size_h}`" if not master_caption_sent and v_idx == 1 else f"{media_type} `{v_idx}/{len(videos)}` | `{duration_str}` | `{size_h}`"
-                    if not master_caption_sent and v_idx == 1: master_caption_sent = True
-                    
-                    for attempt in range(3):
-                        try:
-                            start_time_up = [time.time()]
-                            await client.send_video(chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, supports_streaming=True, caption=caption, reply_to_message_id=reply_id, progress=pyrogram_progress, progress_args=(status, start_time_up, f"Uploading {media_type} {v_idx}/{len(videos)}", title))
-                            upload_success = True
-                            media_tracker.mark_uploaded(album_id, 'videos', v_url)
-                            uploaded_v += 1
-                            await asyncio.sleep(15)
-                            break
-                        except FloodWait as e:
-                            print(f"⏳ FloodWait: {e.value if hasattr(e, 'value') else 15}s")
-                            await asyncio.sleep((e.value if hasattr(e, 'value') else 15) + 15)
-                        except RPCError as e:
-                            if "FILE_PART_X_MISSING" in str(e): await asyncio.sleep(25)
-                            elif attempt < 2: await asyncio.sleep(15)
-                        except Exception as e:
-                            if attempt < 2: await asyncio.sleep(15)
-                    
-                    if not upload_success:
-                        error_notifier.notify("Video Upload", f"Failed: {v_idx}/{len(videos)}", album_id)
-                        log_error_to_db(album_id, "video_upload", f"Failed video {v_idx}")
-                        album_success = False
-                    
-                except Exception as e:
-                    error_notifier.notify("Video Download", str(e), album_id)
-                    log_error_to_db(album_id, "video_download", str(e))
-                    album_success = False
-                finally:
-                    try:
-                        if os.path.exists(filepath): os.remove(filepath)
-                        if thumb and os.path.exists(thumb): os.remove(thumb)
-                    except: pass
-
-        # Album Report
-        missing = media_tracker.get_missing_media(album_id)
-        missing_p = len(missing['photos'])
-        missing_v = len(missing['videos'])
+                    if os.path.exists(filepath): os.remove(filepath)
+                    if thumb and os.path.exists(thumb): os.remove(thumb)
+                except: pass
         
-        error_notifier.album_report(album_id, title, len(photos), len(videos), 
-                                    downloaded_p, uploaded_p, downloaded_v, uploaded_v,
-                                    missing_p, missing_v, album_success)
-        
-        if missing_p > 0 or missing_v > 0:
-            print(f"⚠️  MISSING MEDIA: {missing_p} photos, {missing_v} videos were downloaded but not uploaded!")
-        
-        mark_processed(album_id)
-        media_tracker.cleanup_album(album_id)
         try: await status.delete()
         except: pass
+        print(f"   🔓 Upload lock released for {album_id}")
     
+    # ============================================
+    # PHASE 3: REPORT
+    # ============================================
+    missing = media_tracker.get_missing_media(album_id)
+    missing_p, missing_v = len(missing['photos']), len(missing['videos'])
+    album_success = (missing_p == 0 and missing_v == 0)
+    
+    error_notifier.album_report(album_id, title, len(photos), len(videos), len(downloaded_photos), uploaded_p, len(downloaded_videos), uploaded_v, missing_p, missing_v, album_success)
+    
+    if missing_p > 0 or missing_v > 0:
+        print(f"   ⚠️  MISSING: {missing_p} photos, {missing_v} videos")
+    
+    mark_processed(album_id)
+    media_tracker.cleanup_album(album_id)
     return album_success
 
 # ============================================
@@ -794,8 +799,7 @@ async def errors_cmd(client, message):
         rows = conn.execute("SELECT album_id, error_type, error_message, timestamp FROM error_log ORDER BY timestamp DESC LIMIT 20").fetchall()
         conn.close()
         if rows:
-            text = "**Recent Errors:**\n" + "\n".join([f"- `{r[0]}`: {r[1]} - {r[2][:80]}" for r in rows])
-            await message.reply(text)
+            await message.reply("**Recent Errors:**\n" + "\n".join([f"- `{r[0]}`: {r[1]} - {r[2][:80]}" for r in rows]))
         else: await message.reply("✅ No errors logged!")
     except Exception as e: await message.reply(f"Error: {e}")
 
@@ -854,7 +858,7 @@ async def user_cmd(client, message):
     
     if not all_urls: return await msg.edit_text(f"**No content found for `{query}`**")
     print(f"\n{'='*60}\n✅ SCAN COMPLETE: {query}\n{'='*60}\nAlbums: {len(all_urls)}\nPages: {profile_pages} + {search_page}\n{'='*60}\n")
-    await msg.edit_text(f"**Scan Complete!**\nUser: `{query}`\nAlbums: `{len(all_urls)}`\nPages: `{profile_pages}` + `{search_page}`\n\n_Starting downloads..._")
+    await msg.edit_text(f"**Scan Complete!**\nUser: `{query}`\nAlbums: `{len(all_urls)}`\nPages: `{profile_pages}` + `{search_page}`\n\n_Downloading 3 at a time..._")
     
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
@@ -887,9 +891,10 @@ async def main():
         print("\n" + "=" * 60)
         print("🚀 BOT STARTED SUCCESSFULLY!")
         print("=" * 60)
-        print("✅ Error Notifications: TERMINAL ONLY")
+        print("✅ Download: 3 albums concurrently")
+        print("✅ Upload: Sequential per chat (no mixing)")
+        print("✅ Error Notifications: Terminal only")
         print("✅ Media Tracking: Active")
-        print("✅ Smart Queue: 3 concurrent")
         print("✅ All Features: Active")
         print("=" * 60 + "\n")
         await idle()
