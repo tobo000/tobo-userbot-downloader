@@ -23,7 +23,6 @@ from pyrogram.types import (
 from pyrogram.errors import FloodWait, RPCError
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
-from mega import Mega
 
 # ============================================
 # 1. CONFIGURATION
@@ -101,41 +100,28 @@ class RateLimitOptimizer:
         self.adjustment_cooldown = 60
     
     def record_success(self, file_size: int):
-        self.total_uploads += 1
-        self.consecutive_success += 1
-        self.consecutive_floods = 0
-        if self.consecutive_success >= 5:
-            self._decrease_delay()
-            self.consecutive_success = 0
+        self.total_uploads += 1; self.consecutive_success += 1; self.consecutive_floods = 0
+        if self.consecutive_success >= 5: self._decrease_delay(); self.consecutive_success = 0
     
     def record_flood(self, wait_time: int, file_size: int):
-        self.total_uploads += 1
-        self.total_floods += 1
-        self.consecutive_floods += 1
-        self.consecutive_success = 0
+        self.total_uploads += 1; self.total_floods += 1; self.consecutive_floods += 1; self.consecutive_success = 0
         self.flood_history.append({'timestamp': time.time(), 'wait_time': wait_time, 'file_size': file_size})
-        if len(self.flood_history) > 100:
-            self.flood_history = self.flood_history[-100:]
-        if self.consecutive_floods >= 2:
-            self._increase_delay()
-            self.consecutive_floods = 0
+        if len(self.flood_history) > 100: self.flood_history = self.flood_history[-100:]
+        if self.consecutive_floods >= 2: self._increase_delay(); self.consecutive_floods = 0
     
     def _increase_delay(self):
         old_delay = self.current_delay
         self.current_delay = min(self.max_delay, self.current_delay + 10)
-        if self.current_delay != old_delay:
-            print(f"⚡ Rate: Increased delay {old_delay}s → {self.current_delay}s")
+        if self.current_delay != old_delay: print(f"⚡ Rate: Increased delay {old_delay}s → {self.current_delay}s")
     
     def _decrease_delay(self):
-        if time.time() - self.last_adjustment < self.adjustment_cooldown:
-            return
+        if time.time() - self.last_adjustment < self.adjustment_cooldown: return
         old_delay = self.current_delay
         if self.total_uploads > 10:
             flood_rate = self.total_floods / self.total_uploads
             if flood_rate < self.target_flood_rate:
                 self.current_delay = max(self.min_delay, self.current_delay - 3)
-                if self.current_delay != old_delay:
-                    print(f"⚡ Rate: Decreased delay {old_delay}s → {self.current_delay}s")
+                if self.current_delay != old_delay: print(f"⚡ Rate: Decreased delay {old_delay}s → {self.current_delay}s")
         self.last_adjustment = time.time()
     
     def get_upload_delay(self, file_size: int = 0) -> int:
@@ -155,12 +141,7 @@ class RateLimitOptimizer:
     
     def get_stats(self) -> Dict:
         flood_rate = self.total_floods / max(self.total_uploads, 1)
-        return {
-            'current_delay': self.current_delay, 'total_uploads': self.total_uploads,
-            'total_floods': self.total_floods, 'flood_rate': f"{flood_rate:.1%}",
-            'recent_floods': len([f for f in self.flood_history if time.time() - f['timestamp'] < 300]),
-            'consecutive_success': self.consecutive_success
-        }
+        return {'current_delay': self.current_delay, 'total_uploads': self.total_uploads, 'total_floods': self.total_floods, 'flood_rate': f"{flood_rate:.1%}", 'recent_floods': len([f for f in self.flood_history if time.time() - f['timestamp'] < 300]), 'consecutive_success': self.consecutive_success}
     
     def get_dashboard_text(self) -> str:
         s = self.get_stats()
@@ -172,14 +153,10 @@ rate_optimizer = RateLimitOptimizer()
 # ERROR NOTIFIER
 # ============================================
 class ErrorNotifier:
-    def __init__(self):
-        self.error_count = 0
-        self.warning_count = 0
-    
+    def __init__(self): self.error_count = 0; self.warning_count = 0
     def notify(self, error_type, message, details=""):
         self.error_count += 1
         print(f"\n{'='*60}\n⚠️  ERROR #{self.error_count} | {time.strftime('%H:%M:%S')}\n{'='*60}\nType: {error_type}\nMessage: {message[:200]}\n{'='*60}\n")
-    
     def album_report(self, album_id, title, photos, videos, dp, up, dv, uv, mp, mv, success, github):
         status = "✅ COMPLETE" if (success and mp==0 and mv==0 and github) else "❌ ISSUES"
         print(f"\n{'='*60}\n📊 ALBUM REPORT | {status}\n{'='*60}\nAlbum: {album_id}\nTitle: {title[:50]}\nPhotos: {dp}/{photos} | Videos: {dv}/{videos}\nMissing: {mp}p, {mv}v\nGitHub: {'✅' if github else '❌'}\n{'='*60}\n")
@@ -190,87 +167,56 @@ error_notifier = ErrorNotifier()
 # MEDIA TRACKER
 # ============================================
 class MediaTracker:
-    def __init__(self):
-        self.pending_albums = {}
+    def __init__(self): self.pending_albums = {}
     def register_album(self, album_id, title, photos, videos):
-        self.pending_albums[album_id] = {
-            'title': title, 'photos': photos, 'videos': videos,
-            'downloaded': {'photos': [], 'videos': []},
-            'uploaded': {'photos': [], 'videos': []}
-        }
+        self.pending_albums[album_id] = {'title': title, 'photos': photos, 'videos': videos, 'downloaded': {'photos': [], 'videos': []}, 'uploaded': {'photos': [], 'videos': []}}
     def mark_downloaded(self, album_id, media_type, url):
-        if album_id in self.pending_albums:
-            self.pending_albums[album_id]['downloaded'][media_type].append(url)
+        if album_id in self.pending_albums: self.pending_albums[album_id]['downloaded'][media_type].append(url)
     def mark_uploaded(self, album_id, media_type, url):
-        if album_id in self.pending_albums:
-            self.pending_albums[album_id]['uploaded'][media_type].append(url)
+        if album_id in self.pending_albums: self.pending_albums[album_id]['uploaded'][media_type].append(url)
     def get_missing_media(self, album_id):
-        if album_id not in self.pending_albums:
-            return {'photos': [], 'videos': []}
-        album = self.pending_albums[album_id]
-        missing = {'photos': [], 'videos': []}
-        for mt in ['photos', 'videos']:
-            missing[mt] = [u for u in album['downloaded'][mt] if u not in album['uploaded'][mt]]
+        if album_id not in self.pending_albums: return {'photos': [], 'videos': []}
+        album = self.pending_albums[album_id]; missing = {'photos': [], 'videos': []}
+        for mt in ['photos', 'videos']: missing[mt] = [u for u in album['downloaded'][mt] if u not in album['uploaded'][mt]]
         return missing
     def cleanup_album(self, album_id):
-        if album_id in self.pending_albums:
-            del self.pending_albums[album_id]
+        if album_id in self.pending_albums: del self.pending_albums[album_id]
 
 media_tracker = MediaTracker()
 
 def get_chat_lock(chat_id):
-    if chat_id not in chat_locks:
-        chat_locks[chat_id] = asyncio.Lock()
+    if chat_id not in chat_locks: chat_locks[chat_id] = asyncio.Lock()
     return chat_locks[chat_id]
 
 # ============================================
-# SMART QUEUE (max_concurrent=2 to avoid flood)
+# SMART QUEUE
 # ============================================
 class SmartQueue:
     def __init__(self):
-        self.queue = asyncio.Queue()
-        self.active_tasks = {}
-        self.completed_tasks = set()
-        self.failed_tasks = {}
-        self.max_concurrent = 2  # Reduced from 3 to avoid SaveBigFilePart flood
-        self.is_paused = False
-    
+        self.queue = asyncio.Queue(); self.active_tasks = {}; self.completed_tasks = set(); self.failed_tasks = {}
+        self.max_concurrent = 2; self.is_paused = False
     async def add_task(self, task_id, task_func, priority=0, **kwargs):
-        await self.queue.put((priority, task_id, task_func, kwargs))
-        print(f"📥 Queue: {task_id}")
-    
+        await self.queue.put((priority, task_id, task_func, kwargs)); print(f"📥 Queue: {task_id}")
     async def process_queue(self, progress_callback=None):
         while not self.queue.empty():
-            if self.is_paused:
-                await asyncio.sleep(1)
-                continue
+            if self.is_paused: await asyncio.sleep(1); continue
             completed = [tid for tid, t in self.active_tasks.items() if t.done()]
-            for tid in completed:
-                del self.active_tasks[tid]
+            for tid in completed: del self.active_tasks[tid]
             while len(self.active_tasks) >= self.max_concurrent:
                 completed = [tid for tid, t in self.active_tasks.items() if t.done()]
-                for tid in completed:
-                    del self.active_tasks[tid]
+                for tid in completed: del self.active_tasks[tid]
                 await asyncio.sleep(0.5)
             priority, task_id, task_func, kwargs = await self.queue.get()
             task = asyncio.create_task(task_func(**kwargs))
             self.active_tasks[task_id] = task
             task.add_done_callback(lambda t, tid=task_id: self._task_completed(tid, t))
-        if self.active_tasks:
-            await asyncio.gather(*self.active_tasks.values(), return_exceptions=True)
-    
+        if self.active_tasks: await asyncio.gather(*self.active_tasks.values(), return_exceptions=True)
     def _task_completed(self, task_id, task):
         try:
             if task.result(): self.completed_tasks.add(task_id)
             else: self.failed_tasks[task_id] = "Failed"
         except Exception as e: self.failed_tasks[task_id] = str(e)
-    
-    def get_stats(self):
-        return {
-            'queue_size': self.queue.qsize(), 'active_tasks': len(self.active_tasks),
-            'completed': len(self.completed_tasks), 'failed': len(self.failed_tasks),
-            'is_paused': self.is_paused
-        }
+    def get_stats(self): return {'queue_size': self.queue.qsize(), 'active_tasks': len(self.active_tasks), 'completed': len(self.completed_tasks), 'failed': len(self.failed_tasks), 'is_paused': self.is_paused}
     def pause(self): self.is_paused = True
     def resume(self): self.is_paused = False
     def cancel_all(self):
@@ -355,8 +301,7 @@ class LiveDashboard:
     def get_dashboard_text(self, qs=None):
         e = time.strftime('%H:%M:%S', time.gmtime(time.time() - self.start_time))
         t = f"**Live Dashboard**\n━━━━━━━━━━━━━━━━━━━━\nUptime: `{e}`\nDownloaded: `{get_human_size(self.total_downloaded)}`\nSpeed: `{get_human_size(self.current_speed)}`/s\n"
-        if qs:
-            t += f"━━━━━━━━━━━━━━━━━━━━\nStatus: `{'PAUSED' if qs.get('is_paused') else 'RUNNING'}`\nQueue: `{qs.get('queue_size',0)}`\nActive: `{qs.get('active_tasks',0)}`\nDone: `{qs.get('completed',0)}`\nFailed: `{qs.get('failed',0)}`\n"
+        if qs: t += f"━━━━━━━━━━━━━━━━━━━━\nStatus: `{'PAUSED' if qs.get('is_paused') else 'RUNNING'}`\nQueue: `{qs.get('queue_size',0)}`\nActive: `{qs.get('active_tasks',0)}`\nDone: `{qs.get('completed',0)}`\nFailed: `{qs.get('failed',0)}`\n"
         return t
 
 live_dashboard = LiveDashboard()
@@ -379,9 +324,7 @@ class SmartCompressor:
         try:
             osize = os.path.getsize(inp)
             subprocess.run(['ffmpeg', '-i', inp, '-c:v', 'libx264', '-crf', str(profile['crf']), '-preset', profile['preset'], '-c:a', 'aac', '-b:a', '128k', '-movflags', 'faststart', '-y', out], stderr=subprocess.DEVNULL, timeout=300)
-            if os.path.exists(out):
-                print(f"📦 Compressed: {(1 - os.path.getsize(out)/osize)*100:.1f}%")
-                os.remove(inp); os.rename(out, inp); return inp
+            if os.path.exists(out): print(f"📦 Compressed: {(1 - os.path.getsize(out)/osize)*100:.1f}%"); os.remove(inp); os.rename(out, inp); return inp
         except: pass
         return None
     def convert_gif_to_mp4(self, gif):
@@ -566,20 +509,110 @@ def download_simple_file(url, path):
     except: return False
 
 # ============================================
-# MEGA DOWNLOAD
+# MEGA DOWNLOAD (Using megatools command-line)
 # ============================================
 def download_mega_file(url: str, path: str) -> bool:
+    """Download from Mega.nz using megadl command-line tool"""
     try:
-        mega = Mega(); m = mega.login()
         print(f"   📥 Mega Download: {os.path.basename(path)}")
-        m.download_url(url, dest_path=path)
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            print(f"   ✅ Mega download: {get_human_size(os.path.getsize(path))}")
-            return True
+        
+        download_dir = os.path.dirname(path)
+        
+        # Use megadl to download
+        result = subprocess.run(
+            ['megadl', '--path', download_dir, url],
+            capture_output=True, text=True, timeout=600
+        )
+        
+        if result.returncode == 0:
+            # Find the downloaded file and rename it
+            for f in os.listdir(download_dir):
+                f_path = os.path.join(download_dir, f)
+                if os.path.isfile(f_path) and f != os.path.basename(path):
+                    if os.path.getsize(f_path) > 0:
+                        os.rename(f_path, path)
+                        break
+            
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                print(f"   ✅ Mega download: {get_human_size(os.path.getsize(path))}")
+                return True
+        
+        print(f"   ❌ Mega download failed: {result.stderr[:200]}")
+        return False
+        
+    except subprocess.TimeoutExpired:
+        print(f"   ❌ Mega download timeout")
         return False
     except Exception as e:
         print(f"   ❌ Mega download error: {e}")
         return False
+
+# ============================================
+# MEGA SCRAPER (Using megatools)
+# ============================================
+def scrape_mega(url: str) -> Tuple[str, List[str], List[str]]:
+    """Scrape Mega.nz - uses megadl to list files"""
+    cached = smart_cache.get_cached_album(url)
+    if cached: return cached
+    
+    try:
+        print(f"   📡 Mega: Connecting...")
+        
+        # Try to list files with megals
+        result = subprocess.run(
+            ['megals', '--export', url],
+            capture_output=True, text=True, timeout=30
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.strip().split('\n')
+            title = "Mega Folder"
+            photos, videos = [], []
+            
+            for line in lines:
+                # megals output: LINK filename
+                parts = line.strip().split(' ', 1)
+                if len(parts) == 2:
+                    file_url, file_name = parts
+                    if any(file_name.lower().endswith(e) for e in ['.mp4','.webm','.mov','.mkv','.avi']):
+                        videos.append(file_url)
+                    elif any(file_name.lower().endswith(e) for e in ['.jpg','.jpeg','.png','.gif','.webp','.bmp']):
+                        photos.append(file_url)
+            
+            print(f"   📁 Mega: {title} | {len(photos)}p, {len(videos)}v")
+            
+            if not photos and not videos:
+                # If no media files found, treat the URL itself as a single file
+                if '.mp4' in url.lower() or any(url.lower().endswith(e) for e in ['.mp4','.webm','.mov']):
+                    videos = [url]
+                else:
+                    photos = [url]
+        else:
+            # Single file or couldn't list
+            title = "Mega Download"
+            photos, videos = [], []
+            
+            if '.mp4' in url.lower() or any(url.lower().endswith(e) for e in ['.mp4','.webm','.mov','.mkv','.avi']):
+                videos = [url]
+            elif any(url.lower().endswith(e) for e in ['.jpg','.jpeg','.png','.gif','.webp']):
+                photos = [url]
+            else:
+                videos = [url]  # Default to video
+            
+            print(f"   📄 Mega File: {title}")
+        
+        result = (title, photos, videos)
+        smart_cache.cache_album(url, result)
+        return result
+        
+    except Exception as e:
+        # Fallback: treat as single file
+        print(f"   📡 Mega: Single file mode")
+        title = "Mega Download"
+        photos, videos = [], [url]
+        result = (title, photos, videos)
+        smart_cache.cache_album(url, result)
+        return result
 
 # ============================================
 # EROME SCRAPER
@@ -614,39 +647,6 @@ def scrape_erome(url: str) -> Tuple[str, List[str], List[str]]:
     except: return "Error", [], []
 
 # ============================================
-# MEGA SCRAPER
-# ============================================
-def scrape_mega(url: str) -> Tuple[str, List[str], List[str]]:
-    cached = smart_cache.get_cached_album(url)
-    if cached: return cached
-    try:
-        mega = Mega(); m = mega.login()
-        is_folder = '/folder/' in url or '/#F!' in url or 'folder' in url.lower()
-        if is_folder:
-            folder = m.get_public_node(url)
-            title = folder.get('name', 'Mega Folder') if folder else "Mega Folder"
-            photos, videos = [], []
-            children = folder.get('children', {}) if folder else {}
-            for file_id, file_info in children.items():
-                file_name = file_info.get('name', ''); file_url = m.get_link(file_info)
-                if any(file_name.lower().endswith(e) for e in ['.mp4','.webm','.mov','.mkv','.avi']): videos.append(file_url)
-                elif any(file_name.lower().endswith(e) for e in ['.jpg','.jpeg','.png','.gif','.webp','.bmp']): photos.append(file_url)
-            print(f"   📁 Mega Folder: {title} | {len(photos)}p, {len(videos)}v")
-        else:
-            file = m.get_public_node(url)
-            title = file.get('name', 'Mega File') if file else "Mega File"
-            photos, videos = [], []
-            if any(title.lower().endswith(e) for e in ['.mp4','.webm','.mov','.mkv','.avi']): videos = [url]
-            else: photos = [url]
-            print(f"   📄 Mega File: {title}")
-        result = (title, photos, videos)
-        smart_cache.cache_album(url, result)
-        return result
-    except Exception as e:
-        print(f"   ❌ Mega error: {e}")
-        return "Error", [], []
-
-# ============================================
 # MAIN SCRAPER
 # ============================================
 def scrape_album_details(url: str) -> Tuple[str, List[str], List[str]]:
@@ -661,7 +661,7 @@ def scrape_album_details(url: str) -> Tuple[str, List[str], List[str]]:
         return "Error", [], []
 
 # ============================================
-# CORE DELIVERY (FloodWait Fixed)
+# CORE DELIVERY
 # ============================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
@@ -741,7 +741,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     
     print(f"   ✅ Downloaded: {len(downloaded_photos)}p, {len(downloaded_videos)}v")
     
-    # PHASE 2: UPLOAD (Sequential with FloodWait fix)
+    # PHASE 2: UPLOAD
     chat_lock = get_chat_lock(chat_id)
     uploaded_p, uploaded_v = 0, 0
     all_uploaded = True
@@ -752,7 +752,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         master_caption = f"**{title}**\n━━━━━━━━━━━━━━━━\nAlbum: `{current}/{total}`\nContent: `{len(downloaded_photos)}` Photos | `{len(downloaded_videos)}` Videos{' | ' + str(gif_count) + ' GIFs' if gif_count else ''}\nPlatform: `{platform.upper()}`\nUser: `{username.upper()}`\nQuality: Original\n━━━━━━━━━━━━━━━━"
         master_caption_sent = False
         
-        # Upload Photos (with reconnect fix)
         if downloaded_photos:
             photo_media = []
             for idx, (path, caption, p_url) in enumerate(downloaded_photos, 1):
@@ -761,17 +760,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 photo_media.append(InputMediaPhoto(path, caption=fc))
             for i in range(0, len(photo_media), 10):
                 for attempt in range(3):
-                    try:
-                        await client.send_media_group(chat_id, photo_media[i:i+10], reply_to_message_id=reply_id)
-                        await asyncio.sleep(3)
-                        break
+                    try: await client.send_media_group(chat_id, photo_media[i:i+10], reply_to_message_id=reply_id); await asyncio.sleep(3); break
                     except FloodWait as e:
                         wait_time = e.value if hasattr(e,'value') else 15
                         print(f"   ⏳ FloodWait photos: {wait_time}s")
                         await asyncio.sleep(wait_time + 5)
-                        if not app.is_connected:
-                            print(f"   🔄 Reconnecting...")
-                            await app.start()
+                        if not app.is_connected: print(f"   🔄 Reconnecting..."); await app.start()
                     except:
                         if attempt < 2: await asyncio.sleep(5)
             for path, caption, p_url in downloaded_photos:
@@ -780,7 +774,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     if os.path.exists(path): os.remove(path)
                 except: pass
         
-        # Upload Videos (with reconnect fix)
         if downloaded_videos:
             for idx, (filepath, thumb, w, h, dur, caption, is_gif, v_url) in enumerate(downloaded_videos, 1):
                 media_type = "GIF" if is_gif else "Video"
@@ -807,13 +800,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         flood_buffer = rate_optimizer.get_flood_buffer(wait_time)
                         print(f"   ⏳ FloodWait: {wait_time}s (buffer: {flood_buffer}s)")
                         await asyncio.sleep(flood_buffer)
-                        if not app.is_connected:
-                            print(f"   🔄 Reconnecting after flood...")
-                            await app.start()
+                        if not app.is_connected: print(f"   🔄 Reconnecting..."); await app.start()
                     except RPCError as e:
-                        if "FILE_PART_X_MISSING" in str(e):
-                            print(f"   ⏳ File part missing - waiting 30s")
-                            await asyncio.sleep(30)
+                        if "FILE_PART_X_MISSING" in str(e): print(f"   ⏳ File part missing - 30s"); await asyncio.sleep(30)
                         elif attempt < 2: await asyncio.sleep(20)
                     except:
                         if attempt < 2: await asyncio.sleep(20)
@@ -880,7 +869,17 @@ async def handle_callbacks(client, callback_query):
 # ============================================
 @app.on_message(filters.command("start", prefixes=".") & filters.user(ADMIN_IDS))
 async def start_cmd(client, message):
-    await message.reply("**Bot Started!**\n\n**Platforms:** Erome | Mega.nz\n\n.user `<url>` - Download\n.retry - Retry failed\n.failed - Show failed\n.rate - Rate optimizer\n.dashboard - Live status\n.errors - Errors\n.missing - Missing\n.cancel - Stop\n.stats - Statistics\n.reset - Reset", reply_markup=keyboard_manager.get_control_keyboard())
+    await message.reply(
+        "**Bot Started!**\n\n"
+        "**Platforms:** Erome.com | Mega.nz\n\n"
+        "**Commands:**\n"
+        ".user `<url/username>` - Download\n"
+        ".retry - Retry failed\n.failed - Show failed\n"
+        ".rate - Rate optimizer\n.dashboard - Live status\n"
+        ".errors - Errors\n.missing - Missing\n"
+        ".cancel - Stop\n.stats - Statistics\n.reset - Reset DB",
+        reply_markup=keyboard_manager.get_control_keyboard()
+    )
 
 @app.on_message(filters.command("retry", prefixes=".") & filters.user(ADMIN_IDS))
 async def retry_cmd(client, message):
@@ -935,16 +934,19 @@ async def missing_cmd(client, message):
 @app.on_message(filters.command("user", prefixes=".") & filters.user(ADMIN_IDS))
 async def user_cmd(client, message):
     if len(message.command) < 2:
-        await message.reply("Usage: `.user <url or username>`")
+        await message.reply("Usage: `.user <username or URL>`\n\n**Examples:**\n.user Ashpaul69\n.user https://erome.com/a/AbCdEfGh\n.user https://mega.nz/file/abc123")
         return
+    
     chat_id = message.chat.id; raw_input = message.command[1].strip(); cancel_tasks[chat_id] = False
     platform = detect_platform(raw_input)
-    print(f"   🔍 Detected platform: {platform.upper()}")
+    print(f"   🔍 Detected: {platform.upper()}")
     
+    # Direct album/file URL
     if platform in ['erome', 'mega'] and ('/a/' in raw_input or '/folder/' in raw_input or '/file/' in raw_input or '/#F!' in raw_input):
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
         return
     
+    # Erome user scan
     if platform == 'erome':
         query = raw_input.split("erome.com/")[-1].split('/')[0]
         msg = await message.reply(f"**Scanning Erome: `{query}`...**")
@@ -989,8 +991,11 @@ async def user_cmd(client, message):
         await smart_queue.process_queue()
         stats = smart_queue.get_stats(); failed = get_failed_albums()
         await message.reply(f"**Done!** Success: `{stats['completed']}` | Failed: `{stats['failed']}`\nRetry: `{len(failed)}`\n\n_.retry | .failed | .rate_")
+    
+    # Mega.nz direct download
     elif platform == 'mega':
         await process_album(client, chat_id, message.id, raw_input, "mega", 1, 1)
+    
     else:
         await message.reply("❌ Unsupported platform.\n\n**Supported:** Erome.com | Mega.nz")
 
@@ -1018,13 +1023,17 @@ async def main():
         print("\n" + "=" * 60)
         print("🚀 BOT STARTED - Erome + Mega.nz")
         print("=" * 60)
-        print("✅ max_concurrent: 2 (anti-flood)")
-        print("✅ Reconnect after FloodWait: Auto")
-        print("✅ SaveBigFilePart flood: Handled")
         print("✅ Erome: All pages + Nitro download")
-        print("✅ Mega.nz: Folder/File download")
-        print("✅ Original Quality: Real W x H")
+        print("✅ Mega.nz: megadl command-line tool")
+        print("✅ Download: 2 concurrent")
+        print("✅ Upload: Sequential + Rate Optimizer")
+        print("✅ FloodWait: Auto-reconnect")
+        print("✅ GitHub Sync | Media Tracking")
+        print("✅ GIF→MP4 | Compression")
+        print("=" * 60)
+        print("Commands: .user | .retry | .failed | .rate | .dashboard")
         print("=" * 60 + "\n")
+        
         await retry_failed_albums(app, ADMIN_IDS[0], 0)
         await idle()
 
