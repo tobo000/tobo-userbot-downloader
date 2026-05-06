@@ -12,7 +12,7 @@ echo "========================================"
 # 1. Clean up old processes
 # ------------------------------------------
 echo ""
-echo "[1/5] Cleaning up old processes..."
+echo "[1/6] Cleaning up old processes..."
 pkill -9 -f main.py 2>/dev/null
 sleep 1
 echo "      Done."
@@ -21,7 +21,7 @@ echo "      Done."
 # 2. Clean session files
 # ------------------------------------------
 echo ""
-echo "[2/5] Cleaning session files..."
+echo "[2/6] Cleaning session files..."
 rm -f *.session-journal 2>/dev/null
 echo "      Done."
 
@@ -29,7 +29,7 @@ echo "      Done."
 # 3. Activate virtual environment
 # ------------------------------------------
 echo ""
-echo "[3/5] Activating virtual environment..."
+echo "[3/6] Activating virtual environment..."
 if [ -d "venv" ]; then
     source venv/bin/activate
     echo "      Virtual Environment activated."
@@ -39,18 +39,38 @@ else
 fi
 
 # ------------------------------------------
-# 4. Check dependencies
+# 🆕 4. Git Pull (Save DB, Pull Code, Restore DB)
 # ------------------------------------------
 echo ""
-echo "[4/5] Checking dependencies..."
+echo "[4/6] Updating code from GitHub..."
 
-# Check Python
-if command -v python3 &> /dev/null; then
-    echo "      ✅ Python: $(python3 --version)"
+if [ -f "bot_archive.db" ]; then
+    # Save database
+    cp bot_archive.db bot_archive_backup.db
+    echo "      Database saved."
+    
+    # Discard local DB changes
+    git checkout -- bot_archive.db 2>/dev/null
+    
+    # Pull latest code
+    git pull 2>/dev/null
+    
+    # Restore database
+    cp bot_archive_backup.db bot_archive.db
+    rm bot_archive_backup.db
+    echo "      Database restored."
+    
+    echo "      ✅ Code updated!"
 else
-    echo "      ❌ Python3 not found!"
-    exit 1
+    git pull 2>/dev/null
+    echo "      ✅ Code updated (no database to backup)!"
 fi
+
+# ------------------------------------------
+# 5. Check dependencies
+# ------------------------------------------
+echo ""
+echo "[5/6] Checking dependencies..."
 
 # Check FFmpeg
 if command -v ffmpeg &> /dev/null; then
@@ -59,19 +79,11 @@ else
     echo "      ⚠️  FFmpeg not found - video processing disabled"
 fi
 
-# Check FFprobe
-if command -v ffprobe &> /dev/null; then
-    echo "      ✅ FFprobe: installed"
-else
-    echo "      ⚠️  FFprobe not found - video metadata disabled"
-fi
-
-# Check Megatools (for Mega.nz support)
+# Check Megatools
 if command -v megadl &> /dev/null; then
     echo "      ✅ Megatools: installed (Mega.nz support enabled)"
 else
     echo "      ⚠️  Megatools not found - Mega.nz support disabled"
-    echo "      Install: sudo apt-get update && sudo apt-get install -y megatools"
 fi
 
 # Check .env file
@@ -79,15 +91,14 @@ if [ -f ".env" ]; then
     echo "      ✅ .env file: found"
 else
     echo "      ❌ .env file not found!"
-    echo "      Create .env with: API_ID, API_HASH, GH_TOKEN, GH_REPO"
     exit 1
 fi
 
 # ------------------------------------------
-# 5. Backup database + Start bot
+# 6. Backup database + Start bot
 # ------------------------------------------
 echo ""
-echo "[5/5] Starting the Bot..."
+echo "[6/6] Starting the Bot..."
 
 # Create backups folder if not exists
 mkdir -p backups
@@ -126,5 +137,4 @@ echo "   BOT STOPPED"
 echo "========================================"
 echo ""
 echo "   To restart: ./start.sh"
-echo "   To restore backup: cp backups/bot_archive_YYYYMMDD_HHMMSS.db bot_archive.db"
 echo ""
