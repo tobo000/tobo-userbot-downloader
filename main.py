@@ -38,20 +38,45 @@ session = requests.Session(); executor = ThreadPoolExecutor(max_workers=8)
 cancel_tasks = {}; chat_locks = {}
 
 # ============================================
-# RATE LIMIT OPTIMIZER
+# RATE LIMIT OPTIMIZER (STRONGER ANTI-FLOOD)
 # ============================================
 class RateLimitOptimizer:
     def __init__(self):
-        self.delay = 12; self.success = 0; self.floods = 0; self.total = 0; self.ftotal = 0
-    def record_success(self, sz): self.total += 1; self.success += 1
-    def record_flood(self, wt, sz): self.total += 1; self.ftotal += 1; self.success = 0; self.delay = min(60, self.delay + 5)
+        self.delay = 60          # 🆕 Start with 60s
+        self.min_delay = 30      # 🆕 Min 30s
+        self.max_delay = 120     # 🆕 Max 120s
+        self.success = 0
+        self.floods = 0
+        self.total = 0
+        self.ftotal = 0
+
+    def record_success(self, sz):
+        self.total += 1
+        self.success += 1
+        # Slowly decrease delay if no floods
+        if self.success >= 15 and self.delay > self.min_delay:
+            self.delay = max(self.min_delay, self.delay - 5)
+            self.success = 0
+
+    def record_flood(self, wt, sz):
+        self.total += 1
+        self.ftotal += 1
+        self.success = 0
+        # 🆕 Aggressive increase on flood
+        self.delay = min(self.max_delay, self.delay + 30)
+        print(f"   ⚡ Delay increased to {self.delay}s after flood")
+
     def get_delay(self, sz=0):
         mb = sz / 1048576 if sz > 0 else 0
-        if mb > 500: return self.delay + 12
-        if mb > 200: return self.delay + 6
-        if mb > 100: return self.delay + 3
+        if mb > 500: return self.delay + 60   # 🆕 +60s for >500MB
+        if mb > 300: return self.delay + 45   # 🆕 +45s for >300MB
+        if mb > 200: return self.delay + 30   # 🆕 +30s for >200MB
+        if mb > 100: return self.delay + 15   # 🆕 +15s for >100MB
         return self.delay
-    def get_buffer(self, wt): return wt + 8
+
+    def get_buffer(self, wt):
+        return wt + 15
+
     def dash(self):
         r = self.ftotal / max(self.total, 1)
         return f"⚡ **Rate** | Delay: `{self.delay}s` | Floods: `{self.ftotal}` ({r:.1%})\n"
@@ -95,7 +120,7 @@ def get_chat_lock(cid):
     return chat_locks[cid]
 
 # ============================================
-# SMART QUEUE (FIXED)
+# SMART QUEUE
 # ============================================
 class SmartQueue:
     def __init__(self):
@@ -213,53 +238,35 @@ class LiveDashboard:
 live_dashboard = LiveDashboard()
 
 # ============================================
-# SMART COMPRESSOR (GIF Fix)
+# SMART COMPRESSOR (Disabled - Original Quality)
 # ============================================
 class SmartCompressor:
     P = {'l': {'c': 23, 'p': 'fast'}, 'm': {'c': 28, 'p': 'medium'}, 'x': {'c': 32, 'p': 'slow'}}
-    def sc(self, fp): return os.path.exists(fp) and os.path.getsize(fp) / 1048576 > 100
-    def ap(self, fp):
-        mb = os.path.getsize(fp) / 1048576
-        if mb > 500: return self.P['x']
-        if mb > 200: return self.P['m']
-        return self.P['l']
+    
+    def sc(self, fp):
+        return False  # Disabled - keep original quality
+    
     def cv(self, inp, prof=None):
-        if not self.sc(inp): return
-        if not prof: prof = self.ap(inp)
-        out = f"{inp}.c.mp4"
-        try:
-            osz = os.path.getsize(inp)
-            subprocess.run(['ffmpeg', '-i', inp, '-c:v', 'libx264', '-crf', str(prof['c']), '-preset', prof['p'], '-c:a', 'aac', '-b:a', '128k', '-movflags', 'faststart', '-y', out], stderr=subprocess.DEVNULL, timeout=300)
-            if os.path.exists(out): print(f"📦 {(1-os.path.getsize(out)/osz)*100:.0f}%"); os.remove(inp); os.rename(out, inp)
-        except: pass
+        return  # Disabled
+    
     def g2m(self, gif_path):
-        """Convert GIF to MP4 - optimized for Telegram"""
         mp4_path = gif_path.replace('.gif', '.mp4').replace('.GIF', '.mp4')
         try:
             print(f"   🎞️  Converting GIF → MP4: {os.path.basename(gif_path)}")
             cmd = [
                 'ffmpeg', '-i', gif_path,
-                '-c:v', 'libx264',
-                '-pix_fmt', 'yuv420p',
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
                 '-movflags', 'faststart',
                 '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-                '-an',
-                '-y', mp4_path
+                '-an', '-y', mp4_path
             ]
             subprocess.run(cmd, stderr=subprocess.DEVNULL, timeout=120)
             if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 0:
                 print(f"   ✅ GIF converted: {get_human_size(os.path.getsize(mp4_path))}")
                 os.remove(gif_path)
                 return mp4_path
-            else:
-                print(f"   ❌ GIF conversion failed - empty output")
-                return None
-        except subprocess.TimeoutExpired:
-            print(f"   ❌ GIF conversion timeout")
             return None
-        except Exception as e:
-            print(f"   ❌ GIF conversion error: {e}")
-            return None
+        except: return None
 
 smart_compressor = SmartCompressor()
 
@@ -385,7 +392,6 @@ def get_video_meta(fp):
     except: return 1, 1280, 720
 
 def is_gif(u): 
-    """Better GIF detection"""
     return '.gif' in u.lower() or 'gif' in u.lower()
 
 # ============================================
@@ -424,7 +430,6 @@ def download_nitro(url, path, size, sm, loop, a, tp, segs=4):
                 os.remove(pp)
 
 def download_simple(url, path):
-    """Download GIF or simple file"""
     try:
         r = session.get(url, headers={'Referer': 'https://www.erome.com/'}, timeout=30)
         with open(path, 'wb') as f: f.write(r.content)
@@ -453,7 +458,7 @@ def scrape_mega(url):
     if cached: return cached
     try:
         r = subprocess.run(['megals', '--export', url], capture_output=True, text=True, timeout=30)
-        if r.returncode == 0 and r.stdout.strip():  # ✅ FIXED: && → and
+        if r.returncode == 0 and r.stdout.strip():
             lines = r.stdout.strip().split('\n'); t = "Mega"; p, v = [], []
             for l in lines:
                 pts = l.strip().split(' ', 1)
@@ -467,7 +472,6 @@ def scrape_mega(url):
     except: t, p, v = "Mega", [], [url]; res = (t, p, v); smart_cache.put(url, res); return res
 
 def scrape_erome(url):
-    """Scrape Erome - with improved GIF detection"""
     cached = smart_cache.get(url)
     if cached: return cached
     h = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
@@ -481,16 +485,10 @@ def scrape_erome(url):
             if src:
                 if src.startswith('//'): src = 'https:' + src
                 am.append(src)
-        
-        # Better GIF detection
-        gifs = []
-        photos = []
+        gifs, photos = [], []
         for x in am:
-            if '.gif' in x.lower() or 'gif' in x.lower():
-                gifs.append(x)
-            else:
-                photos.append(x)
-        
+            if '.gif' in x.lower() or 'gif' in x.lower(): gifs.append(x)
+            else: photos.append(x)
         vl = []
         for vt in s.find_all(['source', 'video']):
             vs = vt.get('src') or vt.get('data-src')
@@ -499,14 +497,9 @@ def scrape_erome(url):
                 vl.append(vs)
         vl.extend(re.findall(r'https?://[^\s"\'>]+.mp4', r.text))
         vl = list(dict.fromkeys([v for v in vl if "erome.com" in v]))
-        
-        # GIFs go to videos list (will be converted to MP4)
         res = (t, list(dict.fromkeys(photos)), list(dict.fromkeys(gifs + vl)))
         smart_cache.put(url, res)
-        
-        if gifs:
-            print(f"   🎞️  Found {len(gifs)} GIFs (will convert to MP4)")
-        
+        if gifs: print(f"   🎞️  Found {len(gifs)} GIFs")
         return res
     except: return "Error", [], []
 
@@ -519,7 +512,7 @@ def scrape_album_details(url):
     return "Error", [], []
 
 # ============================================
-# CORE DELIVERY
+# CORE DELIVERY (Clear Labels + Strong Anti-Flood)
 # ============================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
@@ -538,7 +531,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     loop = asyncio.get_event_loop()
 
     status = await client.send_message(chat_id,
-        f"📡 **[{current}/{total}] Starting...**\n"
+        f"📡 **[{current}/{total}] STARTING...**\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"📁 `{title[:30]}...`\n"
         f"━━━━━━━━━━━━━━━━\n"
@@ -550,7 +543,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     dp_list, dv_list = [], []
     total_dl_size = 0
 
-    # Download Photos
+    # ============================================
+    # ⬇️ DOWNLOAD PHOTOS
+    # ============================================
     if photos:
         for i, pu in enumerate(photos, 1):
             if cancel_tasks.get(chat_id): break
@@ -566,7 +561,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 media_tracker.md(album_id, 'p', pu); live_dashboard.up(os.path.getsize(path))
                 sz = get_human_size(os.path.getsize(path)); total_dl_size += os.path.getsize(path)
                 await safe_edit(status,
-                    f"🌑 **Downloading Photos**\n"
+                    f"⬇️ **📥 DOWNLOADING PHOTOS**\n"
                     f"━━━━━━━━━━━━━━━━\n"
                     f"📁 `{title[:25]}...`\n"
                     f"━━━━━━━━━━━━━━━━\n"
@@ -578,21 +573,19 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 dp_list.append((path, f"📸 `{i}/{len(photos)}` | `{sz}`", pu))
             except Exception as e: error_notifier.notify("P-DL", str(e), album_id); log_error(album_id, "pdl", str(e))
 
-    # Download Videos/GIFs
+    # ============================================
+    # ⬇️ DOWNLOAD VIDEOS
+    # ============================================
     if videos:
         for vi, vu in enumerate(videos, 1):
             if cancel_tasks.get(chat_id): break
-            gif = is_gif(vu)
-            ext = '.gif' if gif else '.mp4'
-            fp = os.path.join(uf, f"v_{vi}{ext}")
+            gif = is_gif(vu); ext = '.gif' if gif else '.mp4'; fp = os.path.join(uf, f"v_{vi}{ext}")
             try:
                 if platform == 'mega':
                     if not await loop.run_in_executor(executor, download_mega, vu, fp): continue
                 elif gif:
-                    # Download GIF then convert to MP4
-                    print(f"   🎞️  GIF detected, downloading: {os.path.basename(fp)}")
                     await safe_edit(status,
-                        f"🌑 **Downloading GIF**\n"
+                        f"⬇️ **📥 DOWNLOADING GIF**\n"
                         f"━━━━━━━━━━━━━━━━\n"
                         f"📁 `{title[:25]}...`\n"
                         f"━━━━━━━━━━━━━━━━\n"
@@ -600,25 +593,17 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         f"━━━━━━━━━━━━━━━━"
                     )
                     if not await loop.run_in_executor(executor, download_simple, vu, fp): continue
-                    # Convert GIF to MP4
                     converted = smart_compressor.g2m(fp)
-                    if converted:
-                        fp = converted
-                        gif = False  # Now it's an MP4
-                        print(f"   ✅ GIF → MP4 converted successfully")
-                    else:
-                        print(f"   ❌ GIF conversion failed, skipping")
-                        continue
+                    if converted: fp = converted; gif = False
+                    else: continue
                 else:
                     rh = session.head(vu, headers={'Referer': 'https://www.erome.com/'}); sz = int(rh.headers.get('content-length', 0))
                     if sz == 0: continue
-                    await loop.run_in_executor(executor, download_nitro, vu, fp, sz, status, loop, f"🎬 Video {vi}/{len(videos)}", title)
+                    await loop.run_in_executor(executor, download_nitro, vu, fp, sz, status, loop, f"⬇️ Video {vi}/{len(videos)}", title)
                     fv = fp + ".s.mp4"
                     subprocess.run(['ffmpeg', '-i', fp, '-c', 'copy', '-movflags', 'faststart', fv, '-y'], stderr=subprocess.DEVNULL)
                     if os.path.exists(fv): os.remove(fp); os.rename(fv, fp)
-                
                 media_tracker.md(album_id, 'v', vu)
-                smart_compressor.cv(fp)
                 dur, w, h = get_video_meta(fp); sz = get_human_size(os.path.getsize(fp)); total_dl_size += os.path.getsize(fp)
                 thumb = fp + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', fp, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
@@ -629,9 +614,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     print(f"   ✅ DL: {len(dp_list)}p, {len(dv_list)}v | {get_human_size(total_dl_size)}")
 
-    # Download Complete Summary
+    # ============================================
+    # ✅ DOWNLOAD COMPLETE
+    # ============================================
     await safe_edit(status,
-        f"✅ **Download Complete!**\n"
+        f"✅ **📥 DOWNLOAD COMPLETE!**\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"📁 `{title[:25]}...`\n"
         f"━━━━━━━━━━━━━━━━\n"
@@ -639,11 +626,13 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         f"🎬 Videos: `{len(dv_list)}` downloaded\n"
         f"📦 Total: `{get_human_size(total_dl_size)}`\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"📤 **Starting upload...**"
+        f"⬆️ **📤 STARTING UPLOAD...**"
     )
     await asyncio.sleep(2)
 
-    # Upload Phase
+    # ============================================
+    # ⬆️ UPLOAD PHASE
+    # ============================================
     chat_lock = get_chat_lock(chat_id); up_p, up_v = 0, 0; all_ok = True
 
     async with chat_lock:
@@ -655,7 +644,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             f"Content: `{len(dp_list)}` 📸 | `{len(dv_list)}` 🎬{' | '+str(gc)+' GIFs' if gc else ''}\n"
             f"Platform: `{platform.upper()}`\n"
             f"👤 `{username.upper()}`\n"
-            f"📦 Original\n"
+            f"📦 Original Quality\n"
             f"━━━━━━━━━━"
         )
         mcs = False
@@ -671,7 +660,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             for i in range(0, len(pm), 10):
                 cn = i // 10 + 1; chunk = pm[i:i+10]
                 await safe_edit(status,
-                    f"📤 **Uploading Photos**\n"
+                    f"⬆️ **📤 UPLOADING PHOTOS**\n"
                     f"━━━━━━━━━━━━━━━━\n"
                     f"📁 `{title[:25]}...`\n"
                     f"━━━━━━━━━━━━━━━━\n"
@@ -689,35 +678,45 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     if os.path.exists(path): os.remove(path)
                 except: pass
 
-        # Upload Videos
+        # Upload Videos (Strong Anti-Flood)
         if dv_list:
             for idx, (fp, thumb, w, h, dur, cap, gif, vu) in enumerate(dv_list, 1):
-                mt = "🎞️ GIF" if gif else "🎬 Video"
+                mt = "🎞️ GIF" if gif else "🎬 VIDEO"
                 fc = mc + f"\n\n{cap}" if not mcs else cap
                 if idx == 1: mcs = True
                 fsz = os.path.getsize(fp); ok = False; pd = rate_optimizer.get_delay(fsz)
+                
+                # 🆕 Extra wait for very large files
+                if fsz > 400 * 1048576:
+                    extra = 90
+                    print(f"   ⏳ Large file ({get_human_size(fsz)}), extra wait {extra}s")
+                    await safe_edit(status, f"⏳ **LARGE FILE - Extra Wait**\n━━━━━━━━━━━━━━━━\n📦 `{get_human_size(fsz)}`\n⏱ Waiting: `{extra}s`")
+                    await asyncio.sleep(extra)
+                
                 for _ in range(3):
                     try:
-                        if idx > 1: await asyncio.sleep(pd)
+                        if idx > 1 or _ > 0: await asyncio.sleep(pd)
                         await safe_edit(status,
-                            f"📤 **Uploading {mt}**\n"
+                            f"⬆️ **📤 UPLOADING {mt}**\n"
                             f"━━━━━━━━━━━━━━━━\n"
                             f"📁 `{title[:25]}...`\n"
                             f"━━━━━━━━━━━━━━━━\n"
                             f"🎬 {mt}: `{idx}/{len(dv_list)}`\n"
                             f"📦 Size: `{get_human_size(fsz)}`\n"
                             f"⏱ Duration: `{time.strftime('%M:%S', time.gmtime(dur))}`\n"
+                            f"⚡ Delay: `{pd}s`\n"
                             f"━━━━━━━━━━━━━━━━"
                         )
                         st_up = [time.time()]
-                        await client.send_video(chat_id=chat_id, video=fp, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, supports_streaming=True, caption=fc, reply_to_message_id=reply_id, progress=pyro_progress, progress_args=(status, st_up, f"📤 {mt} {idx}/{len(dv_list)}", title))
+                        await client.send_video(chat_id=chat_id, video=fp, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, supports_streaming=True, caption=fc, reply_to_message_id=reply_id, progress=pyro_progress, progress_args=(status, st_up, f"⬆️ {mt} {idx}/{len(dv_list)}", title))
                         ok = True; media_tracker.mu(album_id, 'v', vu); up_v += 1
                         rate_optimizer.record_success(fsz); print(f"   ✅ {idx}"); break
                     except FloodWait as e:
-                        wt = e.value if hasattr(e,'value') else 15; rate_optimizer.record_flood(wt, fsz)
+                        wt = e.value if hasattr(e,'value') else 15
+                        rate_optimizer.record_flood(wt, fsz)
                         fb = rate_optimizer.get_buffer(wt)
-                        print(f"   ⏳ FW: {wt}s (buf: {fb}s)")
-                        await safe_edit(status, f"⏳ **FloodWait {wt}s**\n━━━━━━━━━━━━━━━━\n📁 `{title[:25]}...`\n📦 `{get_human_size(fsz)}`\n⏱ Waiting: `{fb}s`")
+                        print(f"   ⏳ FW: {wt}s (buf: {fb}s) | Delay now: {rate_optimizer.delay}s")
+                        await safe_edit(status, f"⏳ **UPLOAD PAUSED - FloodWait {wt}s**\n━━━━━━━━━━━━━━━━\n📁 `{title[:25]}...`\n📦 `{get_human_size(fsz)}`\n⏱ Waiting: `{fb}s`\n⚡ New Delay: `{rate_optimizer.delay}s`")
                         await asyncio.sleep(fb)
                         try:
                             if not app.is_connected: await app.start()
@@ -779,7 +778,7 @@ async def failed_cmd(c, m):
 @app.on_message(filters.command("rate", prefixes=".") & filters.user(ADMIN_IDS))
 async def rate_cmd(c, m):
     if len(m.command) > 1:
-        try: d = int(m.command[1]); old = rate_optimizer.delay; rate_optimizer.delay = max(5, min(60, d)); await m.reply(f"⚡ `{old}s` → `{rate_optimizer.delay}s`")
+        try: d = int(m.command[1]); old = rate_optimizer.delay; rate_optimizer.delay = max(30, min(120, d)); await m.reply(f"⚡ `{old}s` → `{rate_optimizer.delay}s`")
         except: await m.reply(".rate <s>")
     else: await m.reply(rate_optimizer.dash())
 
@@ -813,8 +812,7 @@ async def user_cmd(c, m):
     if not ri.startswith('http'): pf = 'erome'; q = ri
     else: pf = detect_platform(ri); q = ri.split("erome.com/")[-1].split('/')[0] if pf == 'erome' else ri
     print(f"   🔍 {pf.upper()} | {ri} | Range: {rp}")
-    if pf in ['erome', 'mega'] and ('/a/' in ri or '/folder/' in ri or '/file/' in ri):  # ✅ FIXED: && → and
-        await process_album(c, cid, m.id, ri, "direct", 1, 1); return
+    if pf in ['erome', 'mega'] and ('/a/' in ri or '/folder/' in ri or '/file/' in ri): await process_album(c, cid, m.id, ri, "direct", 1, 1); return
     if pf == 'mega': await process_album(c, cid, m.id, ri, "mega", 1, 1); return
     if pf == 'erome':
         msg = await m.reply(f"**🔍 Scanning `{q}`...**")
@@ -893,11 +891,13 @@ async def main():
     init_db()
     async with app:
         print("\n" + "="*50)
-        print("🚀 BOT STARTED - Erome + Mega.nz")
+        print("🚀 BOT STARTED - Strong Anti-Flood + Clear Labels")
         print("="*50)
-        print("✅ GIF → MP4: Fixed + Better Detection")
-        print("✅ SmartQueue: Continues to next album")
-        print("✅ All Syntax Errors: Fixed")
+        print("✅ Start Delay: 60s (Max: 120s)")
+        print("✅ Large Files (>400MB): Extra 90s wait")
+        print("✅ Flood Recovery: +30s delay")
+        print("✅ Clear Labels: ⬇️ DOWNLOAD / ⬆️ UPLOAD")
+        print("✅ Original Quality: Compression Disabled")
         print("="*50 + "\n")
         await retry_failed(app, ADMIN_IDS[0], 0)
         await idle()
