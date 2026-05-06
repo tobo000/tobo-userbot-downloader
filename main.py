@@ -243,7 +243,7 @@ class SmartCompressor:
                 '-pix_fmt', 'yuv420p',
                 '-movflags', 'faststart',
                 '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-                '-an',  # No audio for GIFs
+                '-an',
                 '-y', mp4_path
             ]
             subprocess.run(cmd, stderr=subprocess.DEVNULL, timeout=120)
@@ -453,7 +453,7 @@ def scrape_mega(url):
     if cached: return cached
     try:
         r = subprocess.run(['megals', '--export', url], capture_output=True, text=True, timeout=30)
-        if r.returncode == 0 && r.stdout.strip():
+        if r.returncode == 0 and r.stdout.strip():  # ✅ FIXED: && → and
             lines = r.stdout.strip().split('\n'); t = "Mega"; p, v = [], []
             for l in lines:
                 pts = l.strip().split(' ', 1)
@@ -482,7 +482,7 @@ def scrape_erome(url):
                 if src.startswith('//'): src = 'https:' + src
                 am.append(src)
         
-        # 🆕 Better GIF detection
+        # Better GIF detection
         gifs = []
         photos = []
         for x in am:
@@ -500,7 +500,7 @@ def scrape_erome(url):
         vl.extend(re.findall(r'https?://[^\s"\'>]+.mp4', r.text))
         vl = list(dict.fromkeys([v for v in vl if "erome.com" in v]))
         
-        # 🆕 GIFs go to videos list (will be converted to MP4)
+        # GIFs go to videos list (will be converted to MP4)
         res = (t, list(dict.fromkeys(photos)), list(dict.fromkeys(gifs + vl)))
         smart_cache.put(url, res)
         
@@ -589,7 +589,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if platform == 'mega':
                     if not await loop.run_in_executor(executor, download_mega, vu, fp): continue
                 elif gif:
-                    # 🆕 Download GIF then convert to MP4
+                    # Download GIF then convert to MP4
                     print(f"   🎞️  GIF detected, downloading: {os.path.basename(fp)}")
                     await safe_edit(status,
                         f"🌑 **Downloading GIF**\n"
@@ -813,7 +813,8 @@ async def user_cmd(c, m):
     if not ri.startswith('http'): pf = 'erome'; q = ri
     else: pf = detect_platform(ri); q = ri.split("erome.com/")[-1].split('/')[0] if pf == 'erome' else ri
     print(f"   🔍 {pf.upper()} | {ri} | Range: {rp}")
-    if pf in ['erome', 'mega'] && ('/a/' in ri or '/folder/' in ri or '/file/' in ri): await process_album(c, cid, m.id, ri, "direct", 1, 1); return
+    if pf in ['erome', 'mega'] and ('/a/' in ri or '/folder/' in ri or '/file/' in ri):  # ✅ FIXED: && → and
+        await process_album(c, cid, m.id, ri, "direct", 1, 1); return
     if pf == 'mega': await process_album(c, cid, m.id, ri, "mega", 1, 1); return
     if pf == 'erome':
         msg = await m.reply(f"**🔍 Scanning `{q}`...**")
@@ -894,10 +895,9 @@ async def main():
         print("\n" + "="*50)
         print("🚀 BOT STARTED - Erome + Mega.nz")
         print("="*50)
-        print("✅ GIF → MP4: Fixed (better detection + conversion)")
-        print("✅ SmartQueue: Fixed (continues to next album)")
-        print("✅ Enhanced Captions")
-        print("✅ Total album count in caption")
+        print("✅ GIF → MP4: Fixed + Better Detection")
+        print("✅ SmartQueue: Continues to next album")
+        print("✅ All Syntax Errors: Fixed")
         print("="*50 + "\n")
         await retry_failed(app, ADMIN_IDS[0], 0)
         await idle()
