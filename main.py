@@ -95,34 +95,73 @@ def get_chat_lock(cid):
     return chat_locks[cid]
 
 # ============================================
-# SMART QUEUE
+# SMART QUEUE (FIXED - Continues to next album)
 # ============================================
 class SmartQueue:
     def __init__(self):
-        self.q = asyncio.Queue(); self.active = {}; self.done = set(); self.fail = {}; self.max = 1; self.paused = False
+        self.q = asyncio.Queue()
+        self.active = {}
+        self.done = set()
+        self.fail = {}
+        self.max = 1
+        self.paused = False
+        self._processing = False
+
     async def add(self, tid, fn, pri=0, **kw):
-        await self.q.put((pri, tid, fn, kw)); print(f"📥 {tid}")
+        await self.q.put((pri, tid, fn, kw))
+        print(f"📥 {tid}")
+
     async def process(self):
-        while not self.q.empty():
-            if self.paused: await asyncio.sleep(1); continue
-            done = [t for t, tk in self.active.items() if tk.done()]
-            for t in done: del self.active[t]
-            while len(self.active) >= self.max: await asyncio.sleep(0.3)
-            _, tid, fn, kw = await self.q.get()
-            tk = asyncio.create_task(fn(**kw)); self.active[tid] = tk
-            tk.add_done_callback(lambda t, i=tid: self._cb(i, t))
-        if self.active: await asyncio.gather(*self.active.values(), return_exceptions=True)
+        if self._processing:
+            return
+        self._processing = True
+        
+        while not self.q.empty() or len(self.active) > 0:
+            if self.paused:
+                await asyncio.sleep(1)
+                continue
+            
+            # Remove completed tasks from active
+            done_keys = [t for t, tk in self.active.items() if tk.done()]
+            for t in done_keys:
+                del self.active[t]
+            
+            # Add new tasks if queue has items and we have capacity
+            while not self.q.empty() and len(self.active) < self.max:
+                _, tid, fn, kw = await self.q.get()
+                tk = asyncio.create_task(fn(**kw))
+                self.active[tid] = tk
+                tk.add_done_callback(lambda t, i=tid: self._cb(i, t))
+            
+            # Wait before checking again
+            await asyncio.sleep(0.3)
+        
+        self._processing = False
+
     def _cb(self, tid, tk):
-        try: self.done.add(tid) if tk.result() else self.fail.update({tid: "Failed"})
-        except Exception as e: self.fail[tid] = str(e)
-    def stats(self): return {'q': self.q.qsize(), 'a': len(self.active), 'd': len(self.done), 'f': len(self.fail), 'p': self.paused}
+        try:
+            if tk.exception():
+                self.fail[tid] = str(tk.exception())
+            elif tk.result():
+                self.done.add(tid)
+            else:
+                self.fail[tid] = "Failed"
+        except Exception as e:
+            self.fail[tid] = str(e)
+
+    def stats(self):
+        return {'q': self.q.qsize(), 'a': len(self.active), 'd': len(self.done), 'f': len(self.fail), 'p': self.paused}
+    
     def pause(self): self.paused = True
     def resume(self): self.paused = False
+    
     def cancel(self):
         while not self.q.empty():
             try: self.q.get_nowait()
             except: pass
         for t in list(self.active.values()): t.cancel()
+        self.active.clear()
+        self._processing = False
 
 smart_queue = SmartQueue()
 
@@ -467,7 +506,7 @@ def scrape_album_details(url):
     return "Error", [], []
 
 # ============================================
-# 🔥 CORE DELIVERY (ENHANCED CAPTIONS)
+# CORE DELIVERY
 # ============================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
@@ -485,7 +524,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     os.makedirs(uf, exist_ok=True)
     loop = asyncio.get_event_loop()
 
-    # 🆕 Enhanced status message
     status = await client.send_message(chat_id,
         f"📡 **[{current}/{total}] Starting...**\n"
         f"━━━━━━━━━━━━━━━━\n"
@@ -499,9 +537,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     dp_list, dv_list = [], []
     total_dl_size = 0
 
-    # ============================================
-    # DOWNLOAD PHOTOS
-    # ============================================
+    # Download Photos
     if photos:
         for i, pu in enumerate(photos, 1):
             if cancel_tasks.get(chat_id): break
@@ -529,9 +565,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 dp_list.append((path, f"📸 `{i}/{len(photos)}` | `{sz}`", pu))
             except Exception as e: error_notifier.notify("P-DL", str(e), album_id); log_error(album_id, "pdl", str(e))
 
-    # ============================================
-    # DOWNLOAD VIDEOS
-    # ============================================
+    # Download Videos
     if videos:
         for vi, vu in enumerate(videos, 1):
             if cancel_tasks.get(chat_id): break
@@ -571,9 +605,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     print(f"   ✅ DL: {len(dp_list)}p, {len(dv_list)}v | {get_human_size(total_dl_size)}")
 
-    # ============================================
-    # 🆕 DOWNLOAD COMPLETE SUMMARY
-    # ============================================
+    # Download Complete Summary
     await safe_edit(status,
         f"✅ **Download Complete!**\n"
         f"━━━━━━━━━━━━━━━━\n"
@@ -587,9 +619,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     )
     await asyncio.sleep(2)
 
-    # ============================================
-    # UPLOAD PHASE
-    # ============================================
+    # Upload Phase
     chat_lock = get_chat_lock(chat_id); up_p, up_v = 0, 0; all_ok = True
 
     async with chat_lock:
@@ -681,9 +711,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     try: await status.delete()
     except: pass
 
-    # ============================================
-    # VERIFY
-    # ============================================
+    # Verify
     miss = media_tracker.miss(album_id); mp, mv = len(miss['p']), len(miss['v'])
     if all_ok and mp == 0 and mv == 0: gh = mark_processed(album_id, title, len(photos), len(videos)); ok_final = True
     else: mark_failed(album_id, url, title, len(photos), len(videos), "inc", f"M:{mp}p,{mv}v"); gh = False; ok_final = False
@@ -840,9 +868,10 @@ async def main():
     init_db()
     async with app:
         print("\n" + "="*50)
-        print("🚀 BOT STARTED")
+        print("🚀 BOT STARTED - Erome + Mega.nz")
         print("="*50)
-        print("✅ Enhanced Captions (DL/UL details)")
+        print("✅ SmartQueue: Fixed (continues to next album)")
+        print("✅ Enhanced Captions")
         print("✅ Total album count in caption")
         print("="*50 + "\n")
         await retry_failed(app, ADMIN_IDS[0], 0)
