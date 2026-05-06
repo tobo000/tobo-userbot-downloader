@@ -95,73 +95,45 @@ def get_chat_lock(cid):
     return chat_locks[cid]
 
 # ============================================
-# SMART QUEUE (FIXED - Continues to next album)
+# SMART QUEUE (FIXED)
 # ============================================
 class SmartQueue:
     def __init__(self):
-        self.q = asyncio.Queue()
-        self.active = {}
-        self.done = set()
-        self.fail = {}
-        self.max = 1
-        self.paused = False
-        self._processing = False
+        self.q = asyncio.Queue(); self.active = {}; self.done = set(); self.fail = {}; self.max = 1; self.paused = False; self._processing = False
 
     async def add(self, tid, fn, pri=0, **kw):
-        await self.q.put((pri, tid, fn, kw))
-        print(f"📥 {tid}")
+        await self.q.put((pri, tid, fn, kw)); print(f"📥 {tid}")
 
     async def process(self):
-        if self._processing:
-            return
+        if self._processing: return
         self._processing = True
-        
         while not self.q.empty() or len(self.active) > 0:
-            if self.paused:
-                await asyncio.sleep(1)
-                continue
-            
-            # Remove completed tasks from active
+            if self.paused: await asyncio.sleep(1); continue
             done_keys = [t for t, tk in self.active.items() if tk.done()]
-            for t in done_keys:
-                del self.active[t]
-            
-            # Add new tasks if queue has items and we have capacity
+            for t in done_keys: del self.active[t]
             while not self.q.empty() and len(self.active) < self.max:
                 _, tid, fn, kw = await self.q.get()
-                tk = asyncio.create_task(fn(**kw))
-                self.active[tid] = tk
+                tk = asyncio.create_task(fn(**kw)); self.active[tid] = tk
                 tk.add_done_callback(lambda t, i=tid: self._cb(i, t))
-            
-            # Wait before checking again
             await asyncio.sleep(0.3)
-        
         self._processing = False
 
     def _cb(self, tid, tk):
         try:
-            if tk.exception():
-                self.fail[tid] = str(tk.exception())
-            elif tk.result():
-                self.done.add(tid)
-            else:
-                self.fail[tid] = "Failed"
-        except Exception as e:
-            self.fail[tid] = str(e)
+            if tk.exception(): self.fail[tid] = str(tk.exception())
+            elif tk.result(): self.done.add(tid)
+            else: self.fail[tid] = "Failed"
+        except Exception as e: self.fail[tid] = str(e)
 
-    def stats(self):
-        return {'q': self.q.qsize(), 'a': len(self.active), 'd': len(self.done), 'f': len(self.fail), 'p': self.paused}
-    
+    def stats(self): return {'q': self.q.qsize(), 'a': len(self.active), 'd': len(self.done), 'f': len(self.fail), 'p': self.paused}
     def pause(self): self.paused = True
     def resume(self): self.paused = False
-    
     def cancel(self):
         while not self.q.empty():
             try: self.q.get_nowait()
             except: pass
         for t in list(self.active.values()): t.cancel()
-        self.active.clear()
-        self._processing = False
+        self.active.clear(); self._processing = False
 
 smart_queue = SmartQueue()
 
@@ -241,7 +213,7 @@ class LiveDashboard:
 live_dashboard = LiveDashboard()
 
 # ============================================
-# SMART COMPRESSOR
+# SMART COMPRESSOR (GIF Fix)
 # ============================================
 class SmartCompressor:
     P = {'l': {'c': 23, 'p': 'fast'}, 'm': {'c': 28, 'p': 'medium'}, 'x': {'c': 32, 'p': 'slow'}}
@@ -260,12 +232,34 @@ class SmartCompressor:
             subprocess.run(['ffmpeg', '-i', inp, '-c:v', 'libx264', '-crf', str(prof['c']), '-preset', prof['p'], '-c:a', 'aac', '-b:a', '128k', '-movflags', 'faststart', '-y', out], stderr=subprocess.DEVNULL, timeout=300)
             if os.path.exists(out): print(f"📦 {(1-os.path.getsize(out)/osz)*100:.0f}%"); os.remove(inp); os.rename(out, inp)
         except: pass
-    def g2m(self, gif):
-        mp4 = gif.replace('.gif', '.mp4')
+    def g2m(self, gif_path):
+        """Convert GIF to MP4 - optimized for Telegram"""
+        mp4_path = gif_path.replace('.gif', '.mp4').replace('.GIF', '.mp4')
         try:
-            subprocess.run(['ffmpeg', '-i', gif, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', 'faststart', '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-y', mp4], stderr=subprocess.DEVNULL, timeout=120)
-            if os.path.exists(mp4) and os.path.getsize(mp4) > 0: os.remove(gif); return mp4
-        except: pass
+            print(f"   🎞️  Converting GIF → MP4: {os.path.basename(gif_path)}")
+            cmd = [
+                'ffmpeg', '-i', gif_path,
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', 'faststart',
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+                '-an',  # No audio for GIFs
+                '-y', mp4_path
+            ]
+            subprocess.run(cmd, stderr=subprocess.DEVNULL, timeout=120)
+            if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 0:
+                print(f"   ✅ GIF converted: {get_human_size(os.path.getsize(mp4_path))}")
+                os.remove(gif_path)
+                return mp4_path
+            else:
+                print(f"   ❌ GIF conversion failed - empty output")
+                return None
+        except subprocess.TimeoutExpired:
+            print(f"   ❌ GIF conversion timeout")
+            return None
+        except Exception as e:
+            print(f"   ❌ GIF conversion error: {e}")
+            return None
 
 smart_compressor = SmartCompressor()
 
@@ -390,7 +384,9 @@ def get_video_meta(fp):
         return dur, int(vs.get('width', 1280)), int(vs.get('height', 720))
     except: return 1, 1280, 720
 
-def is_gif(u): return '.gif' in u.lower()
+def is_gif(u): 
+    """Better GIF detection"""
+    return '.gif' in u.lower() or 'gif' in u.lower()
 
 # ============================================
 # PLATFORM
@@ -428,6 +424,7 @@ def download_nitro(url, path, size, sm, loop, a, tp, segs=4):
                 os.remove(pp)
 
 def download_simple(url, path):
+    """Download GIF or simple file"""
     try:
         r = session.get(url, headers={'Referer': 'https://www.erome.com/'}, timeout=30)
         with open(path, 'wb') as f: f.write(r.content)
@@ -456,7 +453,7 @@ def scrape_mega(url):
     if cached: return cached
     try:
         r = subprocess.run(['megals', '--export', url], capture_output=True, text=True, timeout=30)
-        if r.returncode == 0 and r.stdout.strip():
+        if r.returncode == 0 && r.stdout.strip():
             lines = r.stdout.strip().split('\n'); t = "Mega"; p, v = [], []
             for l in lines:
                 pts = l.strip().split(' ', 1)
@@ -470,6 +467,7 @@ def scrape_mega(url):
     except: t, p, v = "Mega", [], [url]; res = (t, p, v); smart_cache.put(url, res); return res
 
 def scrape_erome(url):
+    """Scrape Erome - with improved GIF detection"""
     cached = smart_cache.get(url)
     if cached: return cached
     h = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
@@ -483,8 +481,16 @@ def scrape_erome(url):
             if src:
                 if src.startswith('//'): src = 'https:' + src
                 am.append(src)
-        gifs = [x for x in am if '.gif' in x.lower()]
-        photos = [x for x in am if '.gif' not in x.lower()]
+        
+        # 🆕 Better GIF detection
+        gifs = []
+        photos = []
+        for x in am:
+            if '.gif' in x.lower() or 'gif' in x.lower():
+                gifs.append(x)
+            else:
+                photos.append(x)
+        
         vl = []
         for vt in s.find_all(['source', 'video']):
             vs = vt.get('src') or vt.get('data-src')
@@ -493,8 +499,15 @@ def scrape_erome(url):
                 vl.append(vs)
         vl.extend(re.findall(r'https?://[^\s"\'>]+.mp4', r.text))
         vl = list(dict.fromkeys([v for v in vl if "erome.com" in v]))
+        
+        # 🆕 GIFs go to videos list (will be converted to MP4)
         res = (t, list(dict.fromkeys(photos)), list(dict.fromkeys(gifs + vl)))
-        smart_cache.put(url, res); return res
+        smart_cache.put(url, res)
+        
+        if gifs:
+            print(f"   🎞️  Found {len(gifs)} GIFs (will convert to MP4)")
+        
+        return res
     except: return "Error", [], []
 
 def scrape_album_details(url):
@@ -565,15 +578,19 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 dp_list.append((path, f"📸 `{i}/{len(photos)}` | `{sz}`", pu))
             except Exception as e: error_notifier.notify("P-DL", str(e), album_id); log_error(album_id, "pdl", str(e))
 
-    # Download Videos
+    # Download Videos/GIFs
     if videos:
         for vi, vu in enumerate(videos, 1):
             if cancel_tasks.get(chat_id): break
-            gif = is_gif(vu); fp = os.path.join(uf, f"v_{vi}.{'gif' if gif else 'mp4'}")
+            gif = is_gif(vu)
+            ext = '.gif' if gif else '.mp4'
+            fp = os.path.join(uf, f"v_{vi}{ext}")
             try:
                 if platform == 'mega':
                     if not await loop.run_in_executor(executor, download_mega, vu, fp): continue
                 elif gif:
+                    # 🆕 Download GIF then convert to MP4
+                    print(f"   🎞️  GIF detected, downloading: {os.path.basename(fp)}")
                     await safe_edit(status,
                         f"🌑 **Downloading GIF**\n"
                         f"━━━━━━━━━━━━━━━━\n"
@@ -583,9 +600,15 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         f"━━━━━━━━━━━━━━━━"
                     )
                     if not await loop.run_in_executor(executor, download_simple, vu, fp): continue
-                    cv = smart_compressor.g2m(fp)
-                    if cv: fp = cv; gif = False
-                    else: continue
+                    # Convert GIF to MP4
+                    converted = smart_compressor.g2m(fp)
+                    if converted:
+                        fp = converted
+                        gif = False  # Now it's an MP4
+                        print(f"   ✅ GIF → MP4 converted successfully")
+                    else:
+                        print(f"   ❌ GIF conversion failed, skipping")
+                        continue
                 else:
                     rh = session.head(vu, headers={'Referer': 'https://www.erome.com/'}); sz = int(rh.headers.get('content-length', 0))
                     if sz == 0: continue
@@ -593,6 +616,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     fv = fp + ".s.mp4"
                     subprocess.run(['ffmpeg', '-i', fp, '-c', 'copy', '-movflags', 'faststart', fv, '-y'], stderr=subprocess.DEVNULL)
                     if os.path.exists(fv): os.remove(fp); os.rename(fv, fp)
+                
                 media_tracker.md(album_id, 'v', vu)
                 smart_compressor.cv(fp)
                 dur, w, h = get_video_meta(fp); sz = get_human_size(os.path.getsize(fp)); total_dl_size += os.path.getsize(fp)
@@ -789,7 +813,7 @@ async def user_cmd(c, m):
     if not ri.startswith('http'): pf = 'erome'; q = ri
     else: pf = detect_platform(ri); q = ri.split("erome.com/")[-1].split('/')[0] if pf == 'erome' else ri
     print(f"   🔍 {pf.upper()} | {ri} | Range: {rp}")
-    if pf in ['erome', 'mega'] and ('/a/' in ri or '/folder/' in ri or '/file/' in ri): await process_album(c, cid, m.id, ri, "direct", 1, 1); return
+    if pf in ['erome', 'mega'] && ('/a/' in ri or '/folder/' in ri or '/file/' in ri): await process_album(c, cid, m.id, ri, "direct", 1, 1); return
     if pf == 'mega': await process_album(c, cid, m.id, ri, "mega", 1, 1); return
     if pf == 'erome':
         msg = await m.reply(f"**🔍 Scanning `{q}`...**")
@@ -870,6 +894,7 @@ async def main():
         print("\n" + "="*50)
         print("🚀 BOT STARTED - Erome + Mega.nz")
         print("="*50)
+        print("✅ GIF → MP4: Fixed (better detection + conversion)")
         print("✅ SmartQueue: Fixed (continues to next album)")
         print("✅ Enhanced Captions")
         print("✅ Total album count in caption")
