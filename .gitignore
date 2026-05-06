@@ -1,6 +1,24 @@
-downloads/
+# Environment
+.env
+venv/
+
+# Session files
 *.session
 *.session-journal
-.env
+
+# Database (synced separately by bot)
+# bot_archive.db
+
+# Downloads
+downloads/
+
+# Backups
+backups/
+
+# Logs
+*.log
+
+# Cache
+cache/
+checkpoints/
 __pycache__/
-bot_archive.db
